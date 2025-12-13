@@ -78,25 +78,25 @@ def initialize_database():
         return False
 
 # --- NEW: Inventory Loading Function (Using CSV) ---
+# load_quarter_inventory_from_csv फ़ंक्शन (अंतिम और कठोर जाँच के साथ अद्यतन)
 def load_quarter_inventory_from_csv(csv_path):
     """
     CSV फ़ाइल से क्वार्टर इन्वेंट्री लोड करता है और उन्हें master_quarters टेबल में डालता है।
-    यह फ़ंक्शन केवल तब चलाया जाना चाहिए जब टेबल खाली हो।
     """
     conn = get_pg_connection()
     if conn is None: return False
 
     try:
-        # 1. CSV फ़ाइल लोड करें
+        # 1. Excel फ़ाइल लोड करें (अगर यह फ़ेल होता है तो नीचे का कोड नहीं चलता)
         df_inventory = pd.read_csv(csv_path) 
         df_inventory.columns = df_inventory.columns.str.strip().str.upper()
         
         required_cols = ['QUARTER_NUMBER', 'STATION']
         if not all(col in df_inventory.columns for col in required_cols):
-             st.error("CSV Error: Quarter Inventory फ़ाइल में 'QUARTER_NUMBER' और 'STATION' कॉलम नहीं मिले।")
+             st.error("CSV Error: आवश्यक कॉलम नहीं मिले।")
              return False
 
-        # 2. डेटाबेस में कुल मौजूदा क्वार्टरों की संख्या जाँचें
+        # 2. डेटाबेस में कुल मौजूदा क्वार्टरों की संख्या जाँचें (कमिट से पहले)
         existing_count = conn.query("SELECT COUNT(*) FROM master_quarters").iloc[0, 0]
         
         if existing_count > 0:
@@ -111,7 +111,7 @@ def load_quarter_inventory_from_csv(csv_path):
             records_to_insert.append({
                 'q_num': str(row['QUARTER_NUMBER']).strip(),
                 'station': str(row['STATION']).strip().upper(),
-                'status': 'Vacant', # डिफ़ॉल्ट रूप से Vacant
+                'status': 'Vacant',
                 'last_id': None
             })
 
@@ -120,9 +120,18 @@ def load_quarter_inventory_from_csv(csv_path):
             VALUES (:q_num, :station, :status, :last_id)
         '''), records_to_insert)
 
+        # **** COMMIT और सत्यापन ****
         conn.session.commit()
-        st.success(f"कुल {len(records_to_insert)} क्वार्टर सफलतापूर्वक मास्टर रजिस्टर में लोड किए गए।")
-        return True
+        
+        # 4. कमिट के बाद फिर से रो संख्या जाँचें (कठोर सत्यापन)
+        new_count = conn.query("SELECT COUNT(*) FROM master_quarters").iloc[0, 0]
+        
+        if new_count == len(df_inventory):
+            st.success(f"सफलता: कुल {new_count} क्वार्टर सफलतापूर्वक मास्टर रजिस्टर में जोड़े और सत्यापित किए गए।")
+            return True
+        else:
+            st.error(f"INSERT विफल: कमिट के बाद अपेक्षित {len(df_inventory)} के बजाय केवल {new_count} रिकॉर्ड मिले।")
+            return False
 
     except FileNotFoundError:
         st.error(f"Error: Quarter Register CSV file not found at {csv_path}.")
@@ -701,4 +710,5 @@ if __name__ == '__main__':
         os.makedirs('data')
 
     main_streamlit_ui()
+
 
