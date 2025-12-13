@@ -32,32 +32,27 @@ def get_pg_connection():
     except Exception as e:
         st.error(f"Database Connection Error. Check your Streamlit Secrets: {e}")
         return None
-
-# NOTE: हमने तालिका बनाने के लिए परीक्षण करने हेतु अस्थायी रूप से @st.cache_resource हटा दिया है।
-# सफल होने के बाद आप इसे वापस जोड़ सकते हैं।
-# @st.cache_resource(show_spinner="Initializing Database Tables...") 
-# NOTE: Abhi hum @st.cache_resource ko hata rahe hain taaki table zaroor ban jaaye.
-# Safalta ke baad ise wapas laga sakte hain.
+# NOTE: अब हम DDL के लिए conn.session.execute का उपयोग कर रहे हैं।
 def initialize_database():
-    """PostgreSQL mein Tables ko banata hai yadi ve maujood nahi hain, simple execute ka upyog karke."""
+    """PostgreSQL में Tables को बनाता है यदि वे मौजूद नहीं हैं, session.execute का उपयोग करके।"""
     conn = get_pg_connection()
     if conn is None:
         return False
     
     try:
-        # 1. Master Quarters TABLE (Lowercase for PostgreSQL)
-        conn.execute('''
+        # Master Quarters TABLE (Lowercase for PostgreSQL)
+        conn.session.execute('''
             CREATE TABLE IF NOT EXISTS master_quarters (
                 quarter_number TEXT,
                 station TEXT,
-                current_status TEXT, -- 'Occupied', 'Vacant', 'Damaged'
+                current_status TEXT,
                 last_occupant_id TEXT,
                 PRIMARY KEY (quarter_number, station)
             )
         ''')
         
-        # 2. Quarter History TABLE (Lowercase for PostgreSQL)
-        conn.execute('''
+        # Quarter History TABLE (Lowercase for PostgreSQL)
+        conn.session.execute('''
             CREATE TABLE IF NOT EXISTS quarter_history (
                 history_id SERIAL PRIMARY KEY, 
                 quarter_number TEXT,
@@ -73,7 +68,7 @@ def initialize_database():
             )
         ''')
         
-        # NOTE: conn.execute() ke liye alag se commit ki zaroorat nahi hoti.
+        conn.session.commit() # Ensure changes are saved to the database
         return True
     except Exception as e:
         st.error(f"Error initializing tables: {e}")
@@ -645,4 +640,5 @@ if __name__ == '__main__':
         os.makedirs('data')
 
     main_streamlit_ui()
+
 
