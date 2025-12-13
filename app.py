@@ -4,14 +4,16 @@ import os
 import pandas as pd
 from docx import Document 
 import io
-from sqlalchemy.sql import text # For parameterized queries
+from sqlalchemy.sql import text # For parameterized queries and DDL execution
 import sys
 
 # ----------------------------------------------------------------------
 # 0. कॉन्फ़िगरेशन (Config)
 # ----------------------------------------------------------------------
 
-EXCEL_FILE_PATH = "data/UNIT_MUSTER_MASTER.xlsx" 
+# NOTE: सुनिश्चित करें कि ये फ़ाइलें 'data' फ़ोल्डर में मौजूद हैं।
+HRMS_MASTER_FILE = "data/UNIT_MUSTER_MASTER.xlsx" 
+CSV_FILE_PATH = "data/Quarter_Register.csv" 
 
 # --- SECURITY CONFIGURATION ---
 CORRECT_PASSWORD = "Sgam@1234" 
@@ -32,16 +34,16 @@ def get_pg_connection():
     except Exception as e:
         st.error(f"Database Connection Error. Check your Streamlit Secrets: {e}")
         return None
-@st.cache_resource(show_spinner="Initializing Database Tables...") 
+
+# NOTE: हम कैशिंग हटा रहे हैं ताकि यह सुनिश्चित हो सके कि DB initialization हर बार चलती है।
 def initialize_database():
-# --------------------
-    """PostgreSQL में Tables को बनाता है यदि वे मौजूद नहीं हैं, text() function का उपयोग करके।"""
+    """PostgreSQL में टेबल्स को बनाता है यदि वे मौजूद नहीं हैं।"""
     conn = get_pg_connection()
     if conn is None:
         return False
     
     try:
-        # 1. Master Quarters TABLE
+        # 1. Master Quarters TABLE (Lowercase for PostgreSQL, using text() for DDL)
         conn.session.execute(text('''
             CREATE TABLE IF NOT EXISTS master_quarters (
                 quarter_number TEXT,
@@ -52,7 +54,7 @@ def initialize_database():
             )
         '''))
         
-        # 2. Quarter History TABLE 
+        # 2. Quarter History TABLE (Lowercase for PostgreSQL, using text() for DDL)
         conn.session.execute(text('''
             CREATE TABLE IF NOT EXISTS quarter_history (
                 history_id SERIAL PRIMARY KEY, 
@@ -69,11 +71,68 @@ def initialize_database():
             )
         '''))
         
-        conn.session.commit() # Ensure changes are saved
+        conn.session.commit()
         return True
     except Exception as e:
         st.error(f"Error initializing tables: {e}")
         return False
+
+# --- NEW: Inventory Loading Function (Using CSV) ---
+def load_quarter_inventory_from_csv(csv_path):
+    """
+    CSV फ़ाइल से क्वार्टर इन्वेंट्री लोड करता है और उन्हें master_quarters टेबल में डालता है।
+    यह फ़ंक्शन केवल तब चलाया जाना चाहिए जब टेबल खाली हो।
+    """
+    conn = get_pg_connection()
+    if conn is None: return False
+
+    try:
+        # 1. CSV फ़ाइल लोड करें
+        df_inventory = pd.read_csv(csv_path) 
+        df_inventory.columns = df_inventory.columns.str.strip().str.upper()
+        
+        required_cols = ['QUARTER_NUMBER', 'STATION']
+        if not all(col in df_inventory.columns for col in required_cols):
+             st.error("CSV Error: Quarter Inventory फ़ाइल में 'QUARTER_NUMBER' और 'STATION' कॉलम नहीं मिले।")
+             return False
+
+        # 2. डेटाबेस में कुल मौजूदा क्वार्टरों की संख्या जाँचें
+        existing_count = conn.query("SELECT COUNT(*) FROM master_quarters").iloc[0, 0]
+        
+        if existing_count > 0:
+            # st.warning(f"मास्टर क्वार्टर टेबल पहले से ही {existing_count} रिकॉर्ड्स से भरी हुई है। इन्वेंट्री लोड करना छोड़ दिया गया।")
+            return True 
+
+        st.info(f"CSV से {len(df_inventory)} क्वार्टर रिकॉर्ड्स लोड किए जा रहे हैं...")
+
+        # 3. डेटा को PostgreSQL में INSERT करें
+        records_to_insert = []
+        for index, row in df_inventory.iterrows():
+            records_to_insert.append({
+                'q_num': str(row['QUARTER_NUMBER']).strip(),
+                'station': str(row['STATION']).strip().upper(),
+                'status': 'Vacant', # डिफ़ॉल्ट रूप से Vacant
+                'last_id': None
+            })
+
+        conn.session.execute(text('''
+            INSERT INTO master_quarters (quarter_number, station, current_status, last_occupant_id)
+            VALUES (:q_num, :station, :status, :last_id)
+        '''), records_to_insert)
+
+        conn.session.commit()
+        st.success(f"कुल {len(records_to_insert)} क्वार्टर सफलतापूर्वक मास्टर रजिस्टर में लोड किए गए।")
+        return True
+
+    except FileNotFoundError:
+        st.error(f"Error: Quarter Register CSV file not found at {csv_path}.")
+        return False
+    except Exception as e:
+        conn.session.rollback()
+        st.error(f"Error inserting inventory: {e}")
+        return False
+# --- END NEW FUNCTION ---
+
 
 @st.cache_data(ttl=5) # Reduced cache time for fresh data
 def get_all_quarters():
@@ -295,14 +354,14 @@ def generate_full_history_report():
 
 
 # ----------------------------------------------------------------------
-# 5. EMPLOYEE DATA SEARCH & LOOKUP (Excel) - Unchanged
+# 5. EMPLOYEE DATA SEARCH & LOOKUP (Excel) - HRMS MASTER FILE
 # ----------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
 def load_master_excel():
-    """Excel मास्टर फ़ाइल लोड करता है।"""
+    """HRMS मास्टर Excel फ़ाइल लोड करता है।"""
     try:
-        df_master = pd.read_excel(EXCEL_FILE_PATH, sheet_name='Master sheet')
+        df_master = pd.read_excel(HRMS_MASTER_FILE, sheet_name='Master sheet')
         df_master.columns = df_master.columns.str.strip().str.upper() 
         hrms_id_col = 'HRMS ID' if 'HRMS ID' in df_master.columns else 'HRMSID'
         df_master[hrms_id_col] = df_master.get(hrms_id_col, pd.Series()).astype(str).str.strip()
@@ -310,7 +369,7 @@ def load_master_excel():
         df_master['STATION'] = df_master.get('STATION', pd.Series()).astype(str).str.strip().str.upper()
         return df_master, hrms_id_col
     except FileNotFoundError:
-        st.error(f"Error: Master Excel file not found at {EXCEL_FILE_PATH}. Check the 'data' folder in your GitHub repository.")
+        st.error(f"Error: HRMS Master Excel file not found at {HRMS_MASTER_FILE}. Check the 'data' folder in your GitHub repository.")
         return pd.DataFrame(), None
     except Exception as e:
         st.error(f"Error reading Excel file: {e}")
@@ -401,7 +460,7 @@ def authenticate_user():
     return True
 
 # ----------------------------------------------------------------------
-# 7. STREAMLIT UI (उपयोगकर्ता इंटरफ़ेस) - Minor changes for robustness
+# 7. STREAMLIT UI (उपयोगकर्ता इंटरफ़ेस)
 # ----------------------------------------------------------------------
 
 def main_streamlit_ui():
@@ -416,20 +475,21 @@ def main_streamlit_ui():
     
     # 2. Run DB Initialization
     if not initialize_database():
-        st.warning("Database initialization failed. Please fix connection secrets and restart the app.")
+        st.warning("Database initialization failed. Please check connection secrets.")
+        return 
+        
+    # 3. RUN INVENTORY LOADING ONCE HERE
+    if not load_quarter_inventory_from_csv(CSV_FILE_PATH):
+        st.error("क्वार्टर इन्वेंट्री लोड नहीं हो सकी। कृपया CSV फ़ाइल और कॉलम नाम जांचें।")
         return 
 
-    # 3. Session State Initialization and Data Load
-    # Fetch data only if not present or explicitly requested to refresh
+    # 4. Session State Initialization and Data Load
     if 'quarter_df' not in st.session_state or st.button("Refresh Status", key='refresh_status'):
         st.session_state.quarter_df = get_all_quarters()
         
-    # Check if data load failed (e.g. empty dataframe due to connection error after init)
     if st.session_state.quarter_df.empty and 'current_status' not in st.session_state.quarter_df.columns:
         st.error("Cannot load quarter data. Please check logs for PostgreSQL connection issues.")
-        # If fetching fails, we stop UI rendering to prevent KeyErrors
-        # return # (We skip return to show the rest of the UI structure)
-
+        # We skip return here to show the rest of the UI structure
 
     if 'search_results' not in st.session_state:
         st.session_state.search_results = pd.DataFrame()
@@ -641,7 +701,3 @@ if __name__ == '__main__':
         os.makedirs('data')
 
     main_streamlit_ui()
-
-
-
-
