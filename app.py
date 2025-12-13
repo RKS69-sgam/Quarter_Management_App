@@ -4,14 +4,13 @@ import os
 import pandas as pd
 from docx import Document 
 import io
-from sqlalchemy.sql import text
+from sqlalchemy.sql import text # For parameterized queries
 import sys
 
 # ----------------------------------------------------------------------
 # 0. कॉन्फ़िगरेशन (Config)
 # ----------------------------------------------------------------------
 
-# NOTE: PostgreSQL का उपयोग करने के कारण quarter_register.db अब आवश्यक नहीं है।
 EXCEL_FILE_PATH = "data/UNIT_MUSTER_MASTER.xlsx" 
 
 # --- SECURITY CONFIGURATION ---
@@ -32,10 +31,11 @@ def get_pg_connection():
         return st.connection("quarter_db", type="sql") 
     except Exception as e:
         st.error(f"Database Connection Error. Check your Streamlit Secrets: {e}")
-        # In case of connection failure, we stop the app execution
         return None
 
-@st.cache_resource(show_spinner="Initializing Database Tables...")
+# NOTE: हमने तालिका बनाने के लिए परीक्षण करने हेतु अस्थायी रूप से @st.cache_resource हटा दिया है।
+# सफल होने के बाद आप इसे वापस जोड़ सकते हैं।
+# @st.cache_resource(show_spinner="Initializing Database Tables...") 
 def initialize_database():
     """PostgreSQL में टेबल्स को बनाता है यदि वे मौजूद नहीं हैं।"""
     conn = get_pg_connection()
@@ -43,20 +43,22 @@ def initialize_database():
         return False
     
     try:
-        # Master Quarter Register Table
+        # NOTE: PostgreSQL-friendly lowercase table names used
+        
+        # Master Quarters TABLE
         conn.session.execute(text('''
-            CREATE TABLE IF NOT EXISTS Master_Quarters (
+            CREATE TABLE IF NOT EXISTS master_quarters (
                 quarter_number TEXT,
                 station TEXT,
-                current_status TEXT, -- 'Occupied', 'Vacant', 'Damaged'
+                current_status TEXT,
                 last_occupant_id TEXT,
                 PRIMARY KEY (quarter_number, station)
             )
         '''))
         
-        # Quarter History Log Table
+        # Quarter History TABLE 
         conn.session.execute(text('''
-            CREATE TABLE IF NOT EXISTS Quarter_History (
+            CREATE TABLE IF NOT EXISTS quarter_history (
                 history_id SERIAL PRIMARY KEY, 
                 quarter_number TEXT,
                 station TEXT, 
@@ -76,6 +78,7 @@ def initialize_database():
         st.error(f"Error initializing tables: {e}")
         return False
 
+@st.cache_data(ttl=5) # Reduced cache time for fresh data
 def get_all_quarters():
     """सभी क्वार्टर और उनके स्टेटस फ़ेच करता है।"""
     conn = get_pg_connection()
@@ -83,8 +86,8 @@ def get_all_quarters():
         return pd.DataFrame()
     
     try:
-        # conn.query Pandas DataFrame लौटाता है
-        df = conn.query("SELECT quarter_number, station, current_status FROM Master_Quarters ORDER BY station, quarter_number")
+        # NOTE: Lowercase table name 'master_quarters'
+        df = conn.query("SELECT quarter_number, station, current_status FROM master_quarters ORDER BY station, quarter_number")
         return df
     except Exception as e:
         st.error(f"Error fetching quarters: {e}")
@@ -92,12 +95,11 @@ def get_all_quarters():
 
 
 # ----------------------------------------------------------------------
-# 2. WORD FILE GENERATION (वर्ड फाइल जनरेशन)
+# 2. WORD FILE GENERATION (वर्ड फाइल जनरेशन) - Unchanged
 # ----------------------------------------------------------------------
 
 def generate_word_file(template_name, data):
     """Word टेम्पलेट को भरता है और io.BytesIO स्ट्रीम में वापस करता है।"""
-    # [यह फ़ंक्शन पिछले कोड से अपरिवर्तित रहता है]
     current_date = datetime.date.today()
     current_date_str_letter = current_date.strftime('%d/%m/%Y') 
     
@@ -144,7 +146,7 @@ def generate_word_file(template_name, data):
         return None
 
 # ----------------------------------------------------------------------
-# 3. CORE LOGIC (PostgreSQL के लिए अपडेटेड)
+# 3. CORE LOGIC (PostgreSQL के लिए अपडेटेड - Lowecase Table Names)
 # ----------------------------------------------------------------------
 
 def allot_quarter(quarter_num, station, employee_details, allot_date):
@@ -158,14 +160,13 @@ def allot_quarter(quarter_num, station, employee_details, allot_date):
     
     try:
         # 1. CHECK FOR DUPLICATE ALLOTMENT
-        # conn.query Pandas DataFrame लौटाता है
-        df_dup = conn.query("SELECT quarter_number FROM Quarter_History WHERE hrms_id = :hrms_id AND is_current = TRUE",
+        df_dup = conn.query("SELECT quarter_number FROM quarter_history WHERE hrms_id = :hrms_id AND is_current = TRUE",
                             params={"hrms_id": hrms_id})
         if not df_dup.empty:
             return False, f"Error: Employee ({hrms_id}) already occupies quarter {df_dup.iloc[0]['quarter_number']}. Please vacate the previous one first."
             
         # 2. Check quarter status
-        df_status = conn.query("SELECT current_status FROM Master_Quarters WHERE quarter_number = :q_num AND station = :station", 
+        df_status = conn.query("SELECT current_status FROM master_quarters WHERE quarter_number = :q_num AND station = :station", 
                                 params={"q_num": quarter_num, "station": station})
         
         if df_status.empty:
@@ -176,14 +177,14 @@ def allot_quarter(quarter_num, station, employee_details, allot_date):
 
         # A. Master Register Update
         conn.session.execute(text('''
-            UPDATE Master_Quarters 
+            UPDATE master_quarters 
             SET current_status = 'Occupied', last_occupant_id = :hrms_id
             WHERE quarter_number = :q_num AND station = :station
         '''), params={'hrms_id': hrms_id, 'q_num': quarter_num, 'station': station})
 
         # B. History Log Insert
         conn.session.execute(text('''
-            INSERT INTO Quarter_History 
+            INSERT INTO quarter_history 
             (quarter_number, station, hrms_id, pf_number, designation, unit, employee_name, allotment_date, is_current)
             VALUES (:q_num, :station, :hrms_id, :pf_num, :desig, :unit, :emp_name, :allot_date, TRUE)
         '''), params={
@@ -217,7 +218,7 @@ def vacate_quarter(quarter_num, station, vacate_date):
     try:
         # A. Get current occupant details
         df_history = conn.query('''
-            SELECT employee_name, hrms_id, pf_number, designation, unit FROM Quarter_History 
+            SELECT employee_name, hrms_id, pf_number, designation, unit FROM quarter_history 
             WHERE quarter_number = :q_num AND station = :station AND is_current = TRUE
         ''', params={'q_num': quarter_num, 'station': station})
         
@@ -232,14 +233,14 @@ def vacate_quarter(quarter_num, station, vacate_date):
         
         # C. History Log Update
         conn.session.execute(text('''
-            UPDATE Quarter_History 
+            UPDATE quarter_history 
             SET vacation_date = :vacate_date, is_current = FALSE
             WHERE quarter_number = :q_num AND station = :station AND is_current = TRUE
         '''), params={'vacate_date': vacate_date_str, 'q_num': quarter_num, 'station': station})
 
         # D. Master Register Update
         conn.session.execute(text('''
-            UPDATE Master_Quarters 
+            UPDATE master_quarters 
             SET current_status = 'Vacant', last_occupant_id = :hrms_id
             WHERE quarter_number = :q_num AND station = :station
         '''), params={'hrms_id': hrms_id, 'q_num': quarter_num, 'station': station})
@@ -258,7 +259,7 @@ def vacate_quarter(quarter_num, station, vacate_date):
 
 
 # ----------------------------------------------------------------------
-# 4. REPORTING (PostgreSQL के लिए अपडेटेड)
+# 4. REPORTING (PostgreSQL के लिए अपडेटेड - Lowecase Table Names)
 # ----------------------------------------------------------------------
 
 def generate_current_status_report():
@@ -271,8 +272,8 @@ def generate_current_status_report():
             COALESCE(QH.hrms_id, 'N/A') AS hrms_id, COALESCE(QH.pf_number, 'N/A') AS pf_number,
             COALESCE(QH.designation, 'N/A') AS designation, COALESCE(QH.unit, 'N/A') AS unit,
             COALESCE(CAST(QH.allotment_date AS TEXT), 'N/A') AS allotment_date
-        FROM Master_Quarters MQ
-        LEFT JOIN Quarter_History QH 
+        FROM master_quarters MQ
+        LEFT JOIN quarter_history QH 
             ON MQ.quarter_number = QH.quarter_number 
             AND MQ.station = QH.station AND QH.is_current = TRUE 
         ORDER BY MQ.station, MQ.quarter_number
@@ -289,7 +290,7 @@ def generate_full_history_report():
             CAST(allotment_date AS TEXT) AS allotment_date, 
             COALESCE(CAST(vacation_date AS TEXT), 'CURRENTLY OCCUPIED') as vacation_date,
             CASE WHEN is_current = TRUE THEN 'Current Occupant' ELSE 'History Record' END as record_type
-        FROM Quarter_History 
+        FROM quarter_history 
         ORDER BY station, quarter_number, allotment_date DESC
     '''
     df = conn.query(query)
@@ -297,11 +298,8 @@ def generate_full_history_report():
 
 
 # ----------------------------------------------------------------------
-# 5. EMPLOYEE DATA SEARCH & LOOKUP (Excel)
+# 5. EMPLOYEE DATA SEARCH & LOOKUP (Excel) - Unchanged
 # ----------------------------------------------------------------------
-
-# [load_master_excel, search_employee_and_get_details, extract_employee_data, 
-# and search_employee_and_get_details_by_hrms remain unchanged as they use Pandas and Excel]
 
 @st.cache_data(ttl=3600)
 def load_master_excel():
@@ -315,7 +313,7 @@ def load_master_excel():
         df_master['STATION'] = df_master.get('STATION', pd.Series()).astype(str).str.strip().str.upper()
         return df_master, hrms_id_col
     except FileNotFoundError:
-        st.error(f"Error: Master Excel file not found at {EXCEL_FILE_PATH}. Check the 'data' folder.")
+        st.error(f"Error: Master Excel file not found at {EXCEL_FILE_PATH}. Check the 'data' folder in your GitHub repository.")
         return pd.DataFrame(), None
     except Exception as e:
         st.error(f"Error reading Excel file: {e}")
@@ -369,7 +367,7 @@ def search_employee_and_get_details_by_hrms(hrms_id):
     }
 
 # ----------------------------------------------------------------------
-# 6. AUTHENTICATION (प्रमाणीकरण)
+# 6. AUTHENTICATION (प्रमाणीकरण) - Unchanged
 # ----------------------------------------------------------------------
 
 def check_password(password):
@@ -406,7 +404,7 @@ def authenticate_user():
     return True
 
 # ----------------------------------------------------------------------
-# 7. STREAMLIT UI (उपयोगकर्ता इंटरफ़ेस)
+# 7. STREAMLIT UI (उपयोगकर्ता इंटरफ़ेस) - Minor changes for robustness
 # ----------------------------------------------------------------------
 
 def main_streamlit_ui():
@@ -419,14 +417,23 @@ def main_streamlit_ui():
     # If authenticated, proceed
     st.title("🏡 रेलवे क्वार्टर प्रबंधन प्रणाली")
     
-    # Run DB Initialization once
+    # 2. Run DB Initialization
     if not initialize_database():
-        st.warning("Database initialization failed. Please check connection secrets.")
+        st.warning("Database initialization failed. Please fix connection secrets and restart the app.")
         return 
 
-    # Session State Initialization and Data Load
-    if 'quarter_df' not in st.session_state:
+    # 3. Session State Initialization and Data Load
+    # Fetch data only if not present or explicitly requested to refresh
+    if 'quarter_df' not in st.session_state or st.button("Refresh Status", key='refresh_status'):
         st.session_state.quarter_df = get_all_quarters()
+        
+    # Check if data load failed (e.g. empty dataframe due to connection error after init)
+    if st.session_state.quarter_df.empty and 'current_status' not in st.session_state.quarter_df.columns:
+        st.error("Cannot load quarter data. Please check logs for PostgreSQL connection issues.")
+        # If fetching fails, we stop UI rendering to prevent KeyErrors
+        # return # (We skip return to show the rest of the UI structure)
+
+
     if 'search_results' not in st.session_state:
         st.session_state.search_results = pd.DataFrame()
     if 'selected_employee' not in st.session_state:
@@ -440,183 +447,197 @@ def main_streamlit_ui():
         st.header("वर्तमान क्वार्टर स्थिति")
         df_status = st.session_state.quarter_df
         
-        col1, col2, col3 = st.columns(3)
-        col1.metric("कुल क्वार्टर", len(df_status))
-        col2.metric("आवंटित (Occupied)", len(df_status[df_status['current_status'] == 'Occupied']))
-        col3.metric("खाली (Vacant)", len(df_status[df_status['current_status'] == 'Vacant']))
-        
-        st.subheader("मास्टर क्वार्टर सूची")
-        st.dataframe(df_status, use_container_width=True)
+        if df_status.empty or 'current_status' not in df_status.columns:
+            st.info("डेटाबेस से कोई क्वार्टर डेटा लोड नहीं हुआ है।")
+        else:
+            col1, col2, col3 = st.columns(3)
+            col1.metric("कुल क्वार्टर", len(df_status))
+            col2.metric("आवंटित (Occupied)", len(df_status[df_status['current_status'] == 'Occupied']))
+            col3.metric("खाली (Vacant)", len(df_status[df_status['current_status'] == 'Vacant']))
+            
+            st.subheader("मास्टर क्वार्टर सूची")
+            st.dataframe(df_status, use_container_width=True)
 
 
     with tab2:
         st.header("🔑 नया क्वार्टर आवंटन")
         
-        stations = st.session_state.quarter_df['station'].unique().tolist()
-        stations.insert(0, '--- स्टेशन चुनें ---')
-        
-        selected_station = st.selectbox("1. स्टेशन चुनें", stations, key='allot_station')
-        
-        if selected_station and selected_station != '--- स्टेशन चुनें ---':
+        if 'current_status' not in st.session_state.quarter_df.columns:
+             st.warning("क्वार्टर आवंटन के लिए डेटाबेस कनेक्शन स्थापित नहीं है।")
+        else:
+            stations = st.session_state.quarter_df['station'].unique().tolist()
+            stations.insert(0, '--- स्टेशन चुनें ---')
             
-            available_quarters = st.session_state.quarter_df[
-                (st.session_state.quarter_df['station'] == selected_station) & 
-                (st.session_state.quarter_df['current_status'] != 'Occupied')
-            ]['quarter_number'].tolist()
+            selected_station = st.selectbox("1. स्टेशन चुनें", stations, key='allot_station')
+            
+            if selected_station and selected_station != '--- स्टेशन चुनें ---':
+                
+                available_quarters = st.session_state.quarter_df[
+                    (st.session_state.quarter_df['station'] == selected_station) & 
+                    (st.session_state.quarter_df['current_status'] != 'Occupied')
+                ]['quarter_number'].tolist()
 
-            if not available_quarters:
-                st.warning(f"स्टेशन **{selected_station}** पर कोई खाली/उपलब्ध क्वार्टर नहीं है।")
-            else:
-                available_quarters.insert(0, '--- क्वार्टर चुनें ---')
-                selected_q_num = st.selectbox("2. खाली क्वार्टर चुनें", available_quarters, key='allot_q_num')
+                if not available_quarters:
+                    st.warning(f"स्टेशन **{selected_station}** पर कोई खाली/उपलब्ध क्वार्टर नहीं है।")
+                else:
+                    available_quarters.insert(0, '--- क्वार्टर चुनें ---')
+                    selected_q_num = st.selectbox("2. खाली क्वार्टर चुनें", available_quarters, key='allot_q_num')
 
-                if selected_q_num != '--- क्वार्टर चुनें ---':
-                    st.subheader(f"कर्मचारी खोजें ({selected_station} के लिए)")
+                    if selected_q_num != '--- क्वार्टर चुनें ---':
+                        st.subheader(f"कर्मचारी खोजें ({selected_station} के लिए)")
 
-                    search_col, status_col = st.columns([2, 1])
+                        search_col, status_col = st.columns([2, 1])
 
-                    with search_col:
-                        search_term = st.text_input("3. कर्मचारी का नाम या HRMS ID दर्ज करें (स्टेशन-फ़िल्टर लागू)", key='allot_search_term')
-                    
-                    if st.button("खोज शुरू करें", key='allot_search_btn'):
-                        if search_term:
-                            st.session_state.search_results = search_employee_and_get_details(search_term, selected_station)
-                            st.session_state.selected_employee = None
-                        else:
-                            st.warning("कृपया खोज के लिए नाम या HRMS ID दर्ज करें।")
-
-                    # Display Search Results
-                    if not st.session_state.search_results.empty:
-                        st.subheader("4. खोज परिणाम (कर्मचारी चुनें)")
+                        with search_col:
+                            search_term = st.text_input("3. कर्मचारी का नाम या HRMS ID दर्ज करें (स्टेशन-फ़िल्टर लागू)", key='allot_search_term')
                         
-                        display_options = [
-                            f"{row['EMPLOYEE NAME']} ({row.get('DESIGNATION', 'N/A')}, HRMS: {row.get('HRMS ID', 'N/A')})"
-                            for index, row in st.session_state.search_results.iterrows()
-                        ]
-                        
-                        selection_index = st.radio("कर्मचारी चुनें:", options=list(range(len(display_options))), format_func=lambda x: display_options[x], key='allot_emp_select')
-                        
-                        selected_row_data = st.session_state.search_results.iloc[selection_index]
-                        st.session_state.selected_employee = extract_employee_data(selected_row_data)
-
-                        st.write(f"**चयनित कर्मचारी:** {st.session_state.selected_employee['employee_name_hindi']} ({st.session_state.selected_employee['hrms_id']})")
-                        
-                        # Date Picker and Final Button
-                        allot_date = st.date_input("5. आवंटन की तिथि चुनें", datetime.date.today(), key='allot_date')
-                        
-                        if st.session_state.selected_employee and st.button("🔑 आवंटन पूरा करें और पत्र डाउनलोड करें", key='final_allot_btn'):
-                            
-                            success, result = allot_quarter(
-                                selected_q_num, 
-                                selected_station, 
-                                st.session_state.selected_employee, 
-                                allot_date
-                            )
-                            
-                            st.session_state.quarter_df = get_all_quarters()
-                            
-                            if success:
-                                st.success(f"**सफलता!** क्वार्टर {selected_q_num} को {st.session_state.selected_employee['employee_name_hindi']} को आवंटित किया गया।")
-                                
-                                if result is not None:
-                                    file_name = f"{selected_station}_{selected_q_num.replace('/', '_')}_Allotment_{datetime.date.today().strftime('%Y%m%d')}.docx"
-                                    st.download_button(
-                                        label="Word पत्र डाउनलोड करें",
-                                        data=result,
-                                        file_name=file_name,
-                                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                                    )
-                                else:
-                                    st.warning("Word मेमो जेनरेट नहीं हो सका।")
-                                    
-                                st.session_state.search_results = pd.DataFrame()
+                        if st.button("खोज शुरू करें", key='allot_search_btn'):
+                            if search_term:
+                                st.session_state.search_results = search_employee_and_get_details(search_term, selected_station)
                                 st.session_state.selected_employee = None
-                                
                             else:
-                                st.error(result)
+                                st.warning("कृपया खोज के लिए नाम या HRMS ID दर्ज करें।")
+
+                        # Display Search Results
+                        if not st.session_state.search_results.empty:
+                            st.subheader("4. खोज परिणाम (कर्मचारी चुनें)")
+                            
+                            display_options = [
+                                f"{row['EMPLOYEE NAME']} ({row.get('DESIGNATION', 'N/A')}, HRMS: {row.get('HRMS ID', 'N/A')})"
+                                for index, row in st.session_state.search_results.iterrows()
+                            ]
+                            
+                            selection_index = st.radio("कर्मचारी चुनें:", options=list(range(len(display_options))), format_func=lambda x: display_options[x], key='allot_emp_select')
+                            
+                            selected_row_data = st.session_state.search_results.iloc[selection_index]
+                            st.session_state.selected_employee = extract_employee_data(selected_row_data)
+
+                            st.write(f"**चयनित कर्मचारी:** {st.session_state.selected_employee['employee_name_hindi']} ({st.session_state.selected_employee['hrms_id']})")
+                            
+                            # Date Picker and Final Button
+                            allot_date = st.date_input("5. आवंटन की तिथि चुनें", datetime.date.today(), key='allot_date')
+                            
+                            if st.session_state.selected_employee and st.button("🔑 आवंटन पूरा करें और पत्र डाउनलोड करें", key='final_allot_btn'):
+                                
+                                success, result = allot_quarter(
+                                    selected_q_num, 
+                                    selected_station, 
+                                    st.session_state.selected_employee, 
+                                    allot_date
+                                )
+                                
+                                # Refresh status manually after transaction
+                                st.session_state.quarter_df = get_all_quarters()
+                                
+                                if success:
+                                    st.success(f"**सफलता!** क्वार्टर {selected_q_num} को {st.session_state.selected_employee['employee_name_hindi']} को आवंटित किया गया।")
+                                    
+                                    if result is not None:
+                                        file_name = f"{selected_station}_{selected_q_num.replace('/', '_')}_Allotment_{datetime.date.today().strftime('%Y%m%d')}.docx"
+                                        st.download_button(
+                                            label="Word पत्र डाउनलोड करें",
+                                            data=result,
+                                            file_name=file_name,
+                                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                        )
+                                    else:
+                                        st.warning("Word मेमो जेनरेट नहीं हो सका।")
+                                        
+                                    st.session_state.search_results = pd.DataFrame()
+                                    st.session_state.selected_employee = None
+                                    
+                                else:
+                                    st.error(result)
 
     with tab3:
         st.header("🗑️ क्वार्टर खाली करना")
 
-        occupied_quarters_df = st.session_state.quarter_df[st.session_state.quarter_df['current_status'] == 'Occupied']
-        
-        if occupied_quarters_df.empty:
-            st.info("वर्तमान में कोई भी क्वार्टर आवंटित नहीं है।")
+        if 'current_status' not in st.session_state.quarter_df.columns:
+             st.warning("क्वार्टर खाली करने के लिए डेटाबेस कनेक्शन स्थापित नहीं है।")
         else:
-            occupied_quarters_df['display'] = occupied_quarters_df['quarter_number'] + " (" + occupied_quarters_df['station'] + ")"
+            occupied_quarters_df = st.session_state.quarter_df[st.session_state.quarter_df['current_status'] == 'Occupied']
             
-            quarters_to_vacate = occupied_quarters_df['display'].tolist()
-            quarters_to_vacate.insert(0, '--- क्वार्टर चुनें ---')
-            
-            selected_quarter_display = st.selectbox("1. खाली करने के लिए क्वार्टर चुनें", quarters_to_vacate, key='vacate_q_select')
-            
-            if selected_quarter_display != '--- क्वार्टर चुनें ---':
+            if occupied_quarters_df.empty:
+                st.info("वर्तमान में कोई भी क्वार्टर आवंटित नहीं है।")
+            else:
+                occupied_quarters_df['display'] = occupied_quarters_df['quarter_number'] + " (" + occupied_quarters_df['station'] + ")"
                 
-                q_num, station = selected_quarter_display.split(' (')
-                station = station.replace(')', '')
+                quarters_to_vacate = occupied_quarters_df['display'].tolist()
+                quarters_to_vacate.insert(0, '--- क्वार्टर चुनें ---')
                 
-                vacate_date = st.date_input("2. खाली करने की तिथि चुनें", datetime.date.today(), key='vacate_date')
-
-                if st.button("🗑️ वेकेशन मेमो जनरेट करें और क्वार्टर खाली करें", key='final_vacate_btn'):
+                selected_quarter_display = st.selectbox("1. खाली करने के लिए क्वार्टर चुनें", quarters_to_vacate, key='vacate_q_select')
+                
+                if selected_quarter_display != '--- क्वार्टर चुनें ---':
                     
-                    success, result = vacate_quarter(q_num, station, vacate_date)
+                    q_num, station = selected_quarter_display.split(' (')
+                    station = station.replace(')', '')
                     
-                    st.session_state.quarter_df = get_all_quarters() 
+                    vacate_date = st.date_input("2. खाली करने की तिथि चुनें", datetime.date.today(), key='vacate_date')
 
-                    if success:
-                        st.success(f"**सफलता!** क्वार्टर {q_num} ({station}) सफलतापूर्वक खाली कर दिया गया।")
+                    if st.button("🗑️ वेकेशन मेमो जनरेट करें और क्वार्टर खाली करें", key='final_vacate_btn'):
                         
-                        if result is not None:
-                            file_name = f"{station}_{q_num.replace('/', '_')}_Vacation_{datetime.date.today().strftime('%Y%m%d')}.docx"
-                            st.download_button(
-                                label="Word वेकेशन मेमो डाउनलोड करें",
-                                data=result,
-                                file_name=file_name,
-                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                            )
-                        else:
-                            st.warning("Word मेमो जेनरेट नहीं हो सका।")
+                        success, result = vacate_quarter(q_num, station, vacate_date)
+                        
+                        # Refresh status manually after transaction
+                        st.session_state.quarter_df = get_all_quarters() 
 
-                    else:
-                        st.error(result)
+                        if success:
+                            st.success(f"**सफलता!** क्वार्टर {q_num} ({station}) सफलतापूर्वक खाली कर दिया गया।")
+                            
+                            if result is not None:
+                                file_name = f"{station}_{q_num.replace('/', '_')}_Vacation_{datetime.date.today().strftime('%Y%m%d')}.docx"
+                                st.download_button(
+                                    label="Word वेकेशन मेमो डाउनलोड करें",
+                                    data=result,
+                                    file_name=file_name,
+                                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                )
+                            else:
+                                st.warning("Word मेमो जेनरेट नहीं हो सका।")
+
+                        else:
+                            st.error(result)
 
 
     with tab4:
         st.header("📊 रिपोर्ट जेनरेट करें")
         
-        report_choice = st.radio(
-            "रिपोर्ट का प्रकार चुनें:",
-            ('वर्तमान स्थिति रिपोर्ट', 'संपूर्ण इतिहास रिपोर्ट'),
-            key='report_type_select'
-        )
-        
-        if report_choice == 'वर्तमान स्थिति रिपोर्ट':
-            st.subheader("सभी क्वार्टरों की वर्तमान स्थिति")
-            df_report = generate_current_status_report()
-            st.dataframe(df_report, use_container_width=True)
-            
-            csv = df_report.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="वर्तमान स्थिति रिपोर्ट (CSV) डाउनलोड करें",
-                data=csv,
-                file_name=f"All_Quarter_Current_Status_{datetime.date.today().strftime('%Y%m%d')}.csv",
-                mime="text/csv",
-                key='download_current_status'
+        if 'current_status' not in st.session_state.quarter_df.columns:
+             st.warning("रिपोर्ट जेनरेट करने के लिए डेटाबेस कनेक्शन स्थापित नहीं है।")
+        else:
+            report_choice = st.radio(
+                "रिपोर्ट का प्रकार चुनें:",
+                ('वर्तमान स्थिति रिपोर्ट', 'संपूर्ण इतिहास रिपोर्ट'),
+                key='report_type_select'
             )
-        
-        elif report_choice == 'संपूर्ण इतिहास रिपोर्ट':
-            st.subheader("सभी क्वार्टरों का सम्पूर्ण इतिहास")
-            df_history = generate_full_history_report()
-            st.dataframe(df_history, use_container_width=True)
             
-            csv = df_history.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="संपूर्ण इतिहास रिपोर्ट (CSV) डाउनलोड करें",
-                data=csv,
-                file_name=f"Full_Quarter_History_{datetime.date.today().strftime('%Y%m%d')}.csv",
-                mime="text/csv",
-                key='download_full_history'
-            )
+            if report_choice == 'वर्तमान स्थिति रिपोर्ट':
+                st.subheader("सभी क्वार्टरों की वर्तमान स्थिति")
+                df_report = generate_current_status_report()
+                st.dataframe(df_report, use_container_width=True)
+                
+                csv = df_report.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="वर्तमान स्थिति रिपोर्ट (CSV) डाउनलोड करें",
+                    data=csv,
+                    file_name=f"All_Quarter_Current_Status_{datetime.date.today().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                    key='download_current_status'
+                )
+            
+            elif report_choice == 'संपूर्ण इतिहास रिपोर्ट':
+                st.subheader("सभी क्वार्टरों का सम्पूर्ण इतिहास")
+                df_history = generate_full_history_report()
+                st.dataframe(df_history, use_container_width=True)
+                
+                csv = df_history.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="संपूर्ण इतिहास रिपोर्ट (CSV) डाउनलोड करें",
+                    data=csv,
+                    file_name=f"Full_Quarter_History_{datetime.date.today().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                    key='download_full_history'
+                )
 
 if __name__ == '__main__':
     if not os.path.exists('data'):
