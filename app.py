@@ -32,16 +32,16 @@ def get_pg_connection():
     except Exception as e:
         st.error(f"Database Connection Error. Check your Streamlit Secrets: {e}")
         return None
-# NOTE: अब हम DDL के लिए conn.session.execute का उपयोग कर रहे हैं।
+# NOTE: Ab hum Textual SQL error ko fix kar rahe hain.
 def initialize_database():
-    """PostgreSQL में Tables को बनाता है यदि वे मौजूद नहीं हैं, session.execute का उपयोग करके।"""
+    """PostgreSQL में Tables को बनाता है यदि वे मौजूद नहीं हैं, text() function का उपयोग करके।"""
     conn = get_pg_connection()
     if conn is None:
         return False
     
     try:
-        # Master Quarters TABLE (Lowercase for PostgreSQL)
-        conn.session.execute('''
+        # 1. Master Quarters TABLE
+        conn.session.execute(text('''
             CREATE TABLE IF NOT EXISTS master_quarters (
                 quarter_number TEXT,
                 station TEXT,
@@ -49,10 +49,10 @@ def initialize_database():
                 last_occupant_id TEXT,
                 PRIMARY KEY (quarter_number, station)
             )
-        ''')
+        '''))
         
-        # Quarter History TABLE (Lowercase for PostgreSQL)
-        conn.session.execute('''
+        # 2. Quarter History TABLE 
+        conn.session.execute(text('''
             CREATE TABLE IF NOT EXISTS quarter_history (
                 history_id SERIAL PRIMARY KEY, 
                 quarter_number TEXT,
@@ -66,9 +66,9 @@ def initialize_database():
                 vacation_date DATE NULL,
                 is_current BOOLEAN
             )
-        ''')
+        '''))
         
-        conn.session.commit() # Ensure changes are saved to the database
+        conn.session.commit() # Ensure changes are saved
         return True
     except Exception as e:
         st.error(f"Error initializing tables: {e}")
@@ -640,5 +640,6 @@ if __name__ == '__main__':
         os.makedirs('data')
 
     main_streamlit_ui()
+
 
 
