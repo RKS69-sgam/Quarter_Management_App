@@ -36,28 +36,28 @@ def get_pg_connection():
 # NOTE: हमने तालिका बनाने के लिए परीक्षण करने हेतु अस्थायी रूप से @st.cache_resource हटा दिया है।
 # सफल होने के बाद आप इसे वापस जोड़ सकते हैं।
 # @st.cache_resource(show_spinner="Initializing Database Tables...") 
+# NOTE: Abhi hum @st.cache_resource ko hata rahe hain taaki table zaroor ban jaaye.
+# Safalta ke baad ise wapas laga sakte hain.
 def initialize_database():
-    """PostgreSQL में टेबल्स को बनाता है यदि वे मौजूद नहीं हैं।"""
+    """PostgreSQL mein Tables ko banata hai yadi ve maujood nahi hain, simple execute ka upyog karke."""
     conn = get_pg_connection()
     if conn is None:
         return False
     
     try:
-        # NOTE: PostgreSQL-friendly lowercase table names used
-        
-        # Master Quarters TABLE
-        conn.session.execute(text('''
+        # 1. Master Quarters TABLE (Lowercase for PostgreSQL)
+        conn.execute('''
             CREATE TABLE IF NOT EXISTS master_quarters (
                 quarter_number TEXT,
                 station TEXT,
-                current_status TEXT,
+                current_status TEXT, -- 'Occupied', 'Vacant', 'Damaged'
                 last_occupant_id TEXT,
                 PRIMARY KEY (quarter_number, station)
             )
-        '''))
+        ''')
         
-        # Quarter History TABLE 
-        conn.session.execute(text('''
+        # 2. Quarter History TABLE (Lowercase for PostgreSQL)
+        conn.execute('''
             CREATE TABLE IF NOT EXISTS quarter_history (
                 history_id SERIAL PRIMARY KEY, 
                 quarter_number TEXT,
@@ -71,8 +71,9 @@ def initialize_database():
                 vacation_date DATE NULL,
                 is_current BOOLEAN
             )
-        '''))
-        conn.session.commit()
+        ''')
+        
+        # NOTE: conn.execute() ke liye alag se commit ki zaroorat nahi hoti.
         return True
     except Exception as e:
         st.error(f"Error initializing tables: {e}")
@@ -644,3 +645,4 @@ if __name__ == '__main__':
         os.makedirs('data')
 
     main_streamlit_ui()
+
