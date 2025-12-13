@@ -1,5 +1,5 @@
 streamlit
 pandas
-sqlite3 
 python-docx
 openpyxl
+
