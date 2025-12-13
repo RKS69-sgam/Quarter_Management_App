@@ -1,4 +1,4 @@
-Sr_No,Station,Pool,Quarter Type,Quarter Number,PF NUMBER,HRMS ID,Employee Name,Occupation Date,Vacant Date,Remark,Unit
+Sr_No,STATION,Pool,Quarter Type,QUARTER_NUMBER,PF NUMBER,HRMS ID,Employee Name,Occupation Date,Vacant Date,Remark,Unit
 1,BRGW,ENGG,RB-I,RB-I/1/A,,,,,,Vacant,
 2,BRGW,ENGG,RB-I,RB-I/1/B,45229800795,XXQYJL,RATNESH KUMAR SINHA,01-10-2016,,Occupation,
 3,BRGW,ENGG,RB-I,RB-I/1/C,45216018236,CFSBZM,ANIT KUMAR VERMA,01-01-2018,,Occupation,
