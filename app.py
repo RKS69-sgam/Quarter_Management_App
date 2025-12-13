@@ -32,8 +32,9 @@ def get_pg_connection():
     except Exception as e:
         st.error(f"Database Connection Error. Check your Streamlit Secrets: {e}")
         return None
-# NOTE: Ab hum Textual SQL error ko fix kar rahe hain.
+@st.cache_resource(show_spinner="Initializing Database Tables...") 
 def initialize_database():
+# --------------------
     """PostgreSQL में Tables को बनाता है यदि वे मौजूद नहीं हैं, text() function का उपयोग करके।"""
     conn = get_pg_connection()
     if conn is None:
@@ -640,6 +641,7 @@ if __name__ == '__main__':
         os.makedirs('data')
 
     main_streamlit_ui()
+
 
 
 
