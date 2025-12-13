@@ -1,83 +1,95 @@
 import streamlit as st
-import sqlite3
 import datetime
 import os 
 import pandas as pd
 from docx import Document 
 import io
-import base64
+from sqlalchemy.sql import text
 import sys
 
 # ----------------------------------------------------------------------
 # 0. कॉन्फ़िगरेशन (Config)
 # ----------------------------------------------------------------------
 
-# NOTE: सुनिश्चित करें कि ये फ़ाइलें और फ़ोल्डर मौजूद हैं:
-# 1. quarter_register.db (यह ऑटो-क्रिएट होता है)
-# 2. data/UNIT_MUSTER_MASTER.xlsx (कर्मचारी मास्टर डेटा)
-# 3. Allotment_Template.docx and Vacation_Template.docx
+# NOTE: PostgreSQL का उपयोग करने के कारण quarter_register.db अब आवश्यक नहीं है।
 EXCEL_FILE_PATH = "data/UNIT_MUSTER_MASTER.xlsx" 
-DB_NAME = 'quarter_register.db'
 
 # --- SECURITY CONFIGURATION ---
-CORRECT_PASSWORD = "Sgam@1234" # आपका निर्धारित पासवर्ड
+CORRECT_PASSWORD = "Sgam@1234" 
 # ------------------------------
 
-st.set_page_config(layout="wide", page_title="रेलवे क्वार्टर प्रबंधन")
+st.set_page_config(layout="wide", page_title="रेलवे क्वार्टर प्रबंधन (PostgreSQL)")
 
 # ----------------------------------------------------------------------
-# 1. DATABASE SETUP (डेटाबेस सेटअप) - Caching resources
+# 1. DATABASE CONNECTION & SETUP (स्थायी PostgreSQL डेटाबेस)
 # ----------------------------------------------------------------------
 
 @st.cache_resource
+def get_pg_connection():
+    """Streamlit Secretes का उपयोग करके PostgreSQL कनेक्शन स्थापित करता है।"""
+    try:
+        # 'quarter_db' secrets.toml में कनेक्शन का नाम है
+        return st.connection("quarter_db", type="sql") 
+    except Exception as e:
+        st.error(f"Database Connection Error. Check your Streamlit Secrets: {e}")
+        # In case of connection failure, we stop the app execution
+        return None
+
+@st.cache_resource(show_spinner="Initializing Database Tables...")
 def initialize_database():
-    """डेटाबेस और टेबल्स को बनाता है यदि वे मौजूद नहीं हैं।"""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-
-    # Master Quarter Register Table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS Master_Quarters (
-            quarter_number TEXT,
-            station TEXT,
-            current_status TEXT, -- 'Occupied', 'Vacant', 'Damaged'
-            last_occupant_id TEXT,
-            PRIMARY KEY (quarter_number, station)
-        )
-    ''')
-
-    # Quarter History Log Table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS Quarter_History (
-            history_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            quarter_number TEXT,
-            station TEXT, 
-            hrms_id TEXT,
-            pf_number TEXT, 
-            designation TEXT, 
-            unit TEXT, 
-            employee_name TEXT,
-            allotment_date TEXT,
-            vacation_date TEXT NULL,
-            is_current BOOLEAN, -- 1 for current, 0 for past
-            FOREIGN KEY (quarter_number, station) REFERENCES Master_Quarters(quarter_number, station)
-        )
-    ''')
-
-    conn.commit()
-    conn.close()
-    return True
-
-def get_db_connection():
-    """SQLite कनेक्शन खोलता है।"""
-    return sqlite3.connect(DB_NAME)
+    """PostgreSQL में टेबल्स को बनाता है यदि वे मौजूद नहीं हैं।"""
+    conn = get_pg_connection()
+    if conn is None:
+        return False
+    
+    try:
+        # Master Quarter Register Table
+        conn.session.execute(text('''
+            CREATE TABLE IF NOT EXISTS Master_Quarters (
+                quarter_number TEXT,
+                station TEXT,
+                current_status TEXT, -- 'Occupied', 'Vacant', 'Damaged'
+                last_occupant_id TEXT,
+                PRIMARY KEY (quarter_number, station)
+            )
+        '''))
+        
+        # Quarter History Log Table
+        conn.session.execute(text('''
+            CREATE TABLE IF NOT EXISTS Quarter_History (
+                history_id SERIAL PRIMARY KEY, 
+                quarter_number TEXT,
+                station TEXT, 
+                hrms_id TEXT,
+                pf_number TEXT, 
+                designation TEXT, 
+                unit TEXT, 
+                employee_name TEXT,
+                allotment_date DATE, 
+                vacation_date DATE NULL,
+                is_current BOOLEAN
+            )
+        '''))
+        conn.session.commit()
+        return True
+    except Exception as e:
+        st.error(f"Error initializing tables: {e}")
+        return False
 
 def get_all_quarters():
     """सभी क्वार्टर और उनके स्टेटस फ़ेच करता है।"""
-    conn = get_db_connection()
-    df = pd.read_sql_query("SELECT quarter_number, station, current_status FROM Master_Quarters ORDER BY station, quarter_number", conn)
-    conn.close()
-    return df
+    conn = get_pg_connection()
+    if conn is None:
+        return pd.DataFrame()
+    
+    try:
+        # conn.query Pandas DataFrame लौटाता है
+        df = conn.query("SELECT quarter_number, station, current_status FROM Master_Quarters ORDER BY station, quarter_number")
+        return df
+    except Exception as e:
+        st.error(f"Error fetching quarters: {e}")
+        return pd.DataFrame()
+
 
 # ----------------------------------------------------------------------
 # 2. WORD FILE GENERATION (वर्ड फाइल जनरेशन)
@@ -85,13 +97,13 @@ def get_all_quarters():
 
 def generate_word_file(template_name, data):
     """Word टेम्पलेट को भरता है और io.BytesIO स्ट्रीम में वापस करता है।"""
-    
+    # [यह फ़ंक्शन पिछले कोड से अपरिवर्तित रहता है]
     current_date = datetime.date.today()
     current_date_str_letter = current_date.strftime('%d/%m/%Y') 
     
     template_path = f'{template_name}.docx'
     if not os.path.exists(template_path):
-        st.error(f"Template file not found: {template_path}. Please upload it.")
+        st.error(f"Template file not found: {template_path}. Please upload it to your GitHub root.")
         return None
 
     try:
@@ -101,7 +113,6 @@ def generate_word_file(template_name, data):
             '{{DATE}}': current_date_str_letter,
             '{{QUARTER_NUMBER}}': data['quarter_number'],
             '{{STATION}}': data.get('station', 'NA'),
-            # Use Hindi data for template
             '{{EMPLOYEE_NAME}}': data.get('employee_name_hindi', data.get('employee_name_english', 'NA')), 
             '{{DESIGNATION}}': data.get('designation_hindi', data.get('designation_english', 'NA')), 
             '{{HRMS_ID}}': data.get('hrms_id', 'NA'),
@@ -109,13 +120,11 @@ def generate_word_file(template_name, data):
             '{{UNIT}}': data.get('unit', 'NA'),
         }
 
-        # Replace text in paragraphs
         for paragraph in document.paragraphs:
             for key, value in replacements.items():
                 if key in paragraph.text:
                     paragraph.text = paragraph.text.replace(key, str(value))
         
-        # Replace text in tables 
         for table in document.tables:
             for row in table.rows:
                 for cell in row.cells:
@@ -134,205 +143,167 @@ def generate_word_file(template_name, data):
         st.error(f"Failed to generate Word file: {e}")
         return None
 
-
 # ----------------------------------------------------------------------
-# 3. CORE LOGIC (मुख्य लॉजिक)
+# 3. CORE LOGIC (PostgreSQL के लिए अपडेटेड)
 # ----------------------------------------------------------------------
 
 def allot_quarter(quarter_num, station, employee_details, allot_date):
-    """क्वार्टर को किसी कर्मचारी को अलॉट करता है और हिस्ट्री अपडेट करता है।"""
+    """क्वार्टर को किसी कर्मचारी को अलॉट करता है और PostgreSQL में हिस्ट्री अपडेट करता है।"""
     
+    conn = get_pg_connection()
+    if conn is None: return False, "Database connection failed."
+
     hrms_id = employee_details['hrms_id']
-    emp_name_db = employee_details['employee_name_english']
-    pf_number = employee_details['pf_number']
-    designation_db = employee_details['designation_english']
-    unit = employee_details['unit'] 
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
     allot_date_str = allot_date.strftime('%Y-%m-%d')
     
     try:
         # 1. CHECK FOR DUPLICATE ALLOTMENT
-        cursor.execute('''
-            SELECT quarter_number, station FROM Quarter_History 
-            WHERE hrms_id = ? AND is_current = 1
-        ''', (hrms_id,))
-        if cursor.fetchone():
-            return False, f"Error: Employee ({hrms_id}) already occupies a quarter. Please vacate the previous one first."
+        # conn.query Pandas DataFrame लौटाता है
+        df_dup = conn.query("SELECT quarter_number FROM Quarter_History WHERE hrms_id = :hrms_id AND is_current = TRUE",
+                            params={"hrms_id": hrms_id})
+        if not df_dup.empty:
+            return False, f"Error: Employee ({hrms_id}) already occupies quarter {df_dup.iloc[0]['quarter_number']}. Please vacate the previous one first."
             
         # 2. Check quarter status
-        cursor.execute("SELECT current_status FROM Master_Quarters WHERE quarter_number = ? AND station = ?", (quarter_num, station))
-        master_data = cursor.fetchone()
+        df_status = conn.query("SELECT current_status FROM Master_Quarters WHERE quarter_number = :q_num AND station = :station", 
+                                params={"q_num": quarter_num, "station": station})
         
-        if not master_data:
+        if df_status.empty:
             return False, f"Error: Quarter {quarter_num} at {station} not found in Master Register."
             
-        if master_data[0] == 'Occupied':
+        if df_status.iloc[0]['current_status'] == 'Occupied':
             return False, f"Warning: Quarter {quarter_num} at {station} is already occupied. Must vacate first."
 
         # A. Master Register Update
-        cursor.execute('''
+        conn.session.execute(text('''
             UPDATE Master_Quarters 
-            SET current_status = 'Occupied', last_occupant_id = ?
-            WHERE quarter_number = ? AND station = ?
-        ''', (hrms_id, quarter_num, station))
+            SET current_status = 'Occupied', last_occupant_id = :hrms_id
+            WHERE quarter_number = :q_num AND station = :station
+        '''), params={'hrms_id': hrms_id, 'q_num': quarter_num, 'station': station})
 
         # B. History Log Insert
-        cursor.execute('''
+        conn.session.execute(text('''
             INSERT INTO Quarter_History 
             (quarter_number, station, hrms_id, pf_number, designation, unit, employee_name, allotment_date, is_current)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-        ''', (quarter_num, station, hrms_id, pf_number, designation_db, unit, emp_name_db, allot_date_str))
-
-        conn.commit()
+            VALUES (:q_num, :station, :hrms_id, :pf_num, :desig, :unit, :emp_name, :allot_date, TRUE)
+        '''), params={
+            'q_num': quarter_num, 
+            'station': station, 
+            'hrms_id': hrms_id, 
+            'pf_num': employee_details['pf_number'], 
+            'desig': employee_details['designation_english'], 
+            'unit': employee_details['unit'], 
+            'emp_name': employee_details['employee_name_english'], 
+            'allot_date': allot_date_str
+        })
+        conn.session.commit()
         
         # C. Generate Word Allotment Letter
-        file_stream = generate_word_file("Allotment_Template", {
-            "type": "Allotment",
-            "quarter_number": quarter_num,
-            "station": station,
-            "employee_name_english": emp_name_db, 
-            "employee_name_hindi": employee_details['employee_name_hindi'],
-            "designation_english": designation_db, 
-            "designation_hindi": employee_details['designation_hindi'],
-            "date": allot_date_str, 
-            "hrms_id": hrms_id,
-            "pf_number": pf_number, 
-            "unit": unit 
-        })
+        file_stream = generate_word_file("Allotment_Template", employee_details | {"quarter_number": quarter_num, "station": station})
         
         return True, file_stream
 
-    except sqlite3.Error as e:
-        conn.rollback()
+    except Exception as e:
+        conn.session.rollback()
         return False, f"Allotment failed: {e}"
-    finally:
-        conn.close()
 
 
 def vacate_quarter(quarter_num, station, vacate_date):
-    """क्वार्टर को खाली करता है और हिस्ट्री अपडेट करता है।"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    """क्वार्टर को खाली करता है और PostgreSQL हिस्ट्री अपडेट करता है।"""
+    conn = get_pg_connection()
+    if conn is None: return False, "Database connection failed."
     vacate_date_str = vacate_date.strftime('%Y-%m-%d')
 
     try:
-        # A. Get current occupant details (English)
-        cursor.execute('''
+        # A. Get current occupant details
+        df_history = conn.query('''
             SELECT employee_name, hrms_id, pf_number, designation, unit FROM Quarter_History 
-            WHERE quarter_number = ? AND station = ? AND is_current = 1
-        ''', (quarter_num, station))
-        history_data = cursor.fetchone()
+            WHERE quarter_number = :q_num AND station = :station AND is_current = TRUE
+        ''', params={'q_num': quarter_num, 'station': station})
         
-        if not history_data:
-            return False, f"Warning: Quarter {quarter_num} at {station} is not currently occupied."
+        if df_history.empty:
+            return False, f"Warning: Quarter {quarter_num} at {station} is not currently occupied in the database."
 
-        emp_name_db, hrms_id, pf_number, designation_db, unit = history_data
+        history_data = df_history.iloc[0]
+        hrms_id = history_data['hrms_id']
         
         # B. Look up Hindi name/designation from Excel
         employee_details_full = search_employee_and_get_details_by_hrms(hrms_id)
         
-        emp_name_template = employee_details_full.get('employee_name_hindi', emp_name_db) if employee_details_full else emp_name_db
-        designation_template = employee_details_full.get('designation_hindi', designation_db) if employee_details_full else designation_db
-
         # C. History Log Update
-        cursor.execute('''
+        conn.session.execute(text('''
             UPDATE Quarter_History 
-            SET vacation_date = ?, is_current = 0
-            WHERE quarter_number = ? AND station = ? AND is_current = 1
-        ''', (vacate_date_str, quarter_num, station))
+            SET vacation_date = :vacate_date, is_current = FALSE
+            WHERE quarter_number = :q_num AND station = :station AND is_current = TRUE
+        '''), params={'vacate_date': vacate_date_str, 'q_num': quarter_num, 'station': station})
 
         # D. Master Register Update
-        cursor.execute('''
+        conn.session.execute(text('''
             UPDATE Master_Quarters 
-            SET current_status = 'Vacant', last_occupant_id = ?
-            WHERE quarter_number = ? AND station = ?
-        ''', (hrms_id, quarter_num, station))
+            SET current_status = 'Vacant', last_occupant_id = :hrms_id
+            WHERE quarter_number = :q_num AND station = :station
+        '''), params={'hrms_id': hrms_id, 'q_num': quarter_num, 'station': station})
 
-        conn.commit()
+        conn.session.commit()
 
-        # E. Generate Word Vacation Memo
-        file_stream = generate_word_file("Vacation_Template", {
-            "type": "Vacation",
-            "quarter_number": q_num,
-            "station": station,
-            "employee_name_english": emp_name_db,
-            "employee_name_hindi": emp_name_template,
-            "designation_english": designation_db,
-            "designation_hindi": designation_template,
-            "date": vacate_date_str, 
-            "hrms_id": hrms_id,
-            "pf_number": pf_number, 
-            "unit": unit 
-        })
+        # E. Generate Word Vacation Memo (Using merged details)
+        template_data = history_data.to_dict() | employee_details_full | {"quarter_number": quarter_num, "station": station}
+        file_stream = generate_word_file("Vacation_Template", template_data)
 
         return True, file_stream
 
-    except sqlite3.Error as e:
-        conn.rollback()
+    except Exception as e:
+        conn.session.rollback()
         return False, f"Vacation failed: {e}"
-    finally:
-        conn.close()
 
 
 # ----------------------------------------------------------------------
-# 4. REPORTING (रिपोर्टिंग)
+# 4. REPORTING (PostgreSQL के लिए अपडेटेड)
 # ----------------------------------------------------------------------
 
 def generate_current_status_report():
-    """सभी क्वार्टरों की वर्तमान स्थिति रिपोर्ट जेनरेट करता है।"""
-    conn = get_db_connection()
+    conn = get_pg_connection()
+    if conn is None: return pd.DataFrame()
     query = '''
         SELECT 
-            MQ.quarter_number, 
-            MQ.station, 
-            MQ.current_status, 
+            MQ.quarter_number, MQ.station, MQ.current_status, 
             COALESCE(QH.employee_name, 'N/A') AS current_occupant,
-            COALESCE(QH.hrms_id, 'N/A') AS hrms_id,
-            COALESCE(QH.pf_number, 'N/A') AS pf_number,
-            COALESCE(QH.designation, 'N/A') AS designation,
-            COALESCE(QH.unit, 'N/A') AS unit,
-            COALESCE(QH.allotment_date, 'N/A') AS allotment_date
+            COALESCE(QH.hrms_id, 'N/A') AS hrms_id, COALESCE(QH.pf_number, 'N/A') AS pf_number,
+            COALESCE(QH.designation, 'N/A') AS designation, COALESCE(QH.unit, 'N/A') AS unit,
+            COALESCE(CAST(QH.allotment_date AS TEXT), 'N/A') AS allotment_date
         FROM Master_Quarters MQ
         LEFT JOIN Quarter_History QH 
             ON MQ.quarter_number = QH.quarter_number 
-            AND MQ.station = QH.station
-            AND QH.is_current = 1 
+            AND MQ.station = QH.station AND QH.is_current = TRUE 
         ORDER BY MQ.station, MQ.quarter_number
     '''
-    df = pd.read_sql_query(query, conn)
-    conn.close()
+    df = conn.query(query)
     return df
 
 def generate_full_history_report():
-    """सभी क्वार्टरों की पूरी हिस्ट्री (वर्तमान और पिछली दोनों) रिपोर्ट जेनरेट करता है।"""
-    conn = get_db_connection()
+    conn = get_pg_connection()
+    if conn is None: return pd.DataFrame()
     query = '''
         SELECT 
-            quarter_number, 
-            station, 
-            employee_name, 
-            hrms_id, 
-            pf_number,
-            designation, 
-            unit,
-            allotment_date, 
-            COALESCE(vacation_date, 'CURRENTLY OCCUPIED') as vacation_date,
-            CASE WHEN is_current = 1 THEN 'Current Occupant' ELSE 'History Record' END as record_type
+            quarter_number, station, employee_name, hrms_id, pf_number, designation, unit,
+            CAST(allotment_date AS TEXT) AS allotment_date, 
+            COALESCE(CAST(vacation_date AS TEXT), 'CURRENTLY OCCUPIED') as vacation_date,
+            CASE WHEN is_current = TRUE THEN 'Current Occupant' ELSE 'History Record' END as record_type
         FROM Quarter_History 
         ORDER BY station, quarter_number, allotment_date DESC
     '''
-    df = pd.read_sql_query(query, conn)
-    conn.close()
+    df = conn.query(query)
     return df
 
 
 # ----------------------------------------------------------------------
-# 5. EMPLOYEE DATA SEARCH & LOOKUP (कर्मचारी डेटा खोज और लुकअप) - Caching dataframes
+# 5. EMPLOYEE DATA SEARCH & LOOKUP (Excel)
 # ----------------------------------------------------------------------
 
-@st.cache_data(ttl=3600) # Cache for 1 hour
+# [load_master_excel, search_employee_and_get_details, extract_employee_data, 
+# and search_employee_and_get_details_by_hrms remain unchanged as they use Pandas and Excel]
+
+@st.cache_data(ttl=3600)
 def load_master_excel():
     """Excel मास्टर फ़ाइल लोड करता है।"""
     try:
@@ -341,21 +312,18 @@ def load_master_excel():
         hrms_id_col = 'HRMS ID' if 'HRMS ID' in df_master.columns else 'HRMSID'
         df_master[hrms_id_col] = df_master.get(hrms_id_col, pd.Series()).astype(str).str.strip()
         df_master['EMPLOYEE NAME'] = df_master.get('EMPLOYEE NAME', pd.Series()).astype(str).str.strip().str.upper()
-        df_master['STATION'] = df_master.get('STATION', pd.Series()).astype(str).str.strip().str.upper() 
+        df_master['STATION'] = df_master.get('STATION', pd.Series()).astype(str).str.strip().str.upper()
         return df_master, hrms_id_col
     except FileNotFoundError:
-        st.error(f"Error: Master Excel file not found at {EXCEL_FILE_PATH}. Please check the path and folder structure.")
+        st.error(f"Error: Master Excel file not found at {EXCEL_FILE_PATH}. Check the 'data' folder.")
         return pd.DataFrame(), None
     except Exception as e:
         st.error(f"Error reading Excel file: {e}")
         return pd.DataFrame(), None
 
 def search_employee_and_get_details(search_term, station_filter):
-    """कर्मचारी खोजता है और विवरण लौटाता है (स्टेशन फ़िल्टर के साथ)।"""
     df_master, hrms_id_col = load_master_excel()
-
-    if df_master.empty:
-        return pd.DataFrame()
+    if df_master.empty: return pd.DataFrame()
 
     search_term = str(search_term).strip().upper()
     station_filter_upper = str(station_filter).strip().upper()
@@ -365,15 +333,12 @@ def search_employee_and_get_details(search_term, station_filter):
         ((df_master[hrms_id_col].str.contains(search_term, na=False)) |
          (df_master['EMPLOYEE NAME'].str.contains(search_term, na=False)))
     ].head(10).reset_index(drop=True)
-
     return results_df
 
+
 def extract_employee_data(selected_row):
-    """चयनित Pandas रो से आवश्यक डेटा निकालता है।"""
     df_master, hrms_id_col = load_master_excel()
-    
-    if df_master.empty or selected_row.empty:
-        return None
+    if df_master.empty or selected_row.empty: return None
 
     unit_val = str(selected_row.get('UNIT', 'NA')) 
     
@@ -388,17 +353,13 @@ def extract_employee_data(selected_row):
     }
 
 def search_employee_and_get_details_by_hrms(hrms_id):
-    """केवल vacate के दौरान हिंदी नाम और पदनाम lookup करने के लिए।"""
     df_master, hrms_id_col = load_master_excel()
-    
-    if df_master.empty:
-        return None
+    if df_master.empty: return None
         
     hrms_id_str = str(hrms_id).strip()
     selected_rows = df_master[df_master[hrms_id_col] == hrms_id_str]
     
-    if selected_rows.empty:
-        return None
+    if selected_rows.empty: return None
 
     selected_row = selected_rows.iloc[0]
     
@@ -412,7 +373,6 @@ def search_employee_and_get_details_by_hrms(hrms_id):
 # ----------------------------------------------------------------------
 
 def check_password(password):
-    """दिए गए पासवर्ड की जाँच करता है।"""
     return password == CORRECT_PASSWORD
 
 def authenticate_user():
@@ -423,7 +383,6 @@ def authenticate_user():
 
     if not st.session_state.authenticated:
         
-        # Centering the login form
         st.sidebar.markdown("## Login Required")
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
@@ -438,13 +397,11 @@ def authenticate_user():
                     if check_password(password):
                         st.session_state.authenticated = True
                         st.success("Login Successful!")
-                        st.rerun() # <--- यहाँ बदलाव किया गया है!
+                        st.rerun() 
                     else:
                         st.error("Invalid Password. Please try again.")
         
         return False
-    
-    return True
     
     return True
 
@@ -457,16 +414,18 @@ def main_streamlit_ui():
     
     # 1. Run Authentication Check
     if not authenticate_user():
-        return # Stop execution if user is not logged in
+        return 
 
-    # If execution reaches here, the user is authenticated
+    # If authenticated, proceed
     st.title("🏡 रेलवे क्वार्टर प्रबंधन प्रणाली")
     
     # Run DB Initialization once
-    initialize_database()
+    if not initialize_database():
+        st.warning("Database initialization failed. Please check connection secrets.")
+        return 
 
     # Session State Initialization and Data Load
-    if 'quarter_df' not in st.session_state or st.session_state.quarter_df.empty:
+    if 'quarter_df' not in st.session_state:
         st.session_state.quarter_df = get_all_quarters()
     if 'search_results' not in st.session_state:
         st.session_state.search_results = pd.DataFrame()
@@ -500,7 +459,6 @@ def main_streamlit_ui():
         
         if selected_station and selected_station != '--- स्टेशन चुनें ---':
             
-            # Filter available quarters (Vacant or Damaged)
             available_quarters = st.session_state.quarter_df[
                 (st.session_state.quarter_df['station'] == selected_station) & 
                 (st.session_state.quarter_df['current_status'] != 'Occupied')
@@ -522,7 +480,6 @@ def main_streamlit_ui():
                     
                     if st.button("खोज शुरू करें", key='allot_search_btn'):
                         if search_term:
-                            # Station Filter is applied here automatically by search_employee_and_get_details
                             st.session_state.search_results = search_employee_and_get_details(search_term, selected_station)
                             st.session_state.selected_employee = None
                         else:
@@ -556,12 +513,11 @@ def main_streamlit_ui():
                                 allot_date
                             )
                             
-                            st.session_state.quarter_df = get_all_quarters() # Update status
+                            st.session_state.quarter_df = get_all_quarters()
                             
                             if success:
                                 st.success(f"**सफलता!** क्वार्टर {selected_q_num} को {st.session_state.selected_employee['employee_name_hindi']} को आवंटित किया गया।")
                                 
-                                # Download Button
                                 if result is not None:
                                     file_name = f"{selected_station}_{selected_q_num.replace('/', '_')}_Allotment_{datetime.date.today().strftime('%Y%m%d')}.docx"
                                     st.download_button(
@@ -571,9 +527,8 @@ def main_streamlit_ui():
                                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                                     )
                                 else:
-                                    st.warning("Word मेमो जेनरेट नहीं हो सका। कृपया टेम्पलेट फ़ाइल जाँच करें।")
+                                    st.warning("Word मेमो जेनरेट नहीं हो सका।")
                                     
-                                # Reset for new allotment
                                 st.session_state.search_results = pd.DataFrame()
                                 st.session_state.selected_employee = None
                                 
@@ -597,7 +552,6 @@ def main_streamlit_ui():
             
             if selected_quarter_display != '--- क्वार्टर चुनें ---':
                 
-                # Extract original quarter_number and station
                 q_num, station = selected_quarter_display.split(' (')
                 station = station.replace(')', '')
                 
@@ -607,12 +561,11 @@ def main_streamlit_ui():
                     
                     success, result = vacate_quarter(q_num, station, vacate_date)
                     
-                    st.session_state.quarter_df = get_all_quarters() # Update status
+                    st.session_state.quarter_df = get_all_quarters() 
 
                     if success:
                         st.success(f"**सफलता!** क्वार्टर {q_num} ({station}) सफलतापूर्वक खाली कर दिया गया।")
                         
-                        # Download Button
                         if result is not None:
                             file_name = f"{station}_{q_num.replace('/', '_')}_Vacation_{datetime.date.today().strftime('%Y%m%d')}.docx"
                             st.download_button(
@@ -622,7 +575,7 @@ def main_streamlit_ui():
                                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                             )
                         else:
-                            st.warning("Word मेमो जेनरेट नहीं हो सका। कृपया टेम्पलेट फ़ाइल जाँच करें।")
+                            st.warning("Word मेमो जेनरेट नहीं हो सका।")
 
                     else:
                         st.error(result)
@@ -642,7 +595,6 @@ def main_streamlit_ui():
             df_report = generate_current_status_report()
             st.dataframe(df_report, use_container_width=True)
             
-            # Excel Download Button
             csv = df_report.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="वर्तमान स्थिति रिपोर्ट (CSV) डाउनलोड करें",
@@ -657,7 +609,6 @@ def main_streamlit_ui():
             df_history = generate_full_history_report()
             st.dataframe(df_history, use_container_width=True)
             
-            # Excel Download Button
             csv = df_history.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="संपूर्ण इतिहास रिपोर्ट (CSV) डाउनलोड करें",
@@ -668,7 +619,6 @@ def main_streamlit_ui():
             )
 
 if __name__ == '__main__':
-    # Initial setup for data folder if not exists
     if not os.path.exists('data'):
         os.makedirs('data')
 
