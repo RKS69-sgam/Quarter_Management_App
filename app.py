@@ -13,7 +13,7 @@ import sys
 
 # NOTE: सुनिश्चित करें कि ये फ़ाइलें 'data' फ़ोल्डर में मौजूद हैं।
 HRMS_MASTER_FILE = "data/UNIT_MUSTER_MASTER.xlsx" 
-CSV_FILE_PATH = "data/Quarter_Register.csv" 
+CSV_FILE_PATH = "data/QUARTER REGISTER.csv" 
 
 # --- SECURITY CONFIGURATION ---
 CORRECT_PASSWORD = "Sgam@1234" 
@@ -701,3 +701,4 @@ if __name__ == '__main__':
         os.makedirs('data')
 
     main_streamlit_ui()
+
