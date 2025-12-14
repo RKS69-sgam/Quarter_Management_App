@@ -285,7 +285,7 @@ def vacate_quarter(quarter_num, station, vacate_date):
     vacate_date_str = vacate_date.strftime('%Y-%m-%d')
 
     try:
-        # A. Get current occupant details
+        # A. Get current occupant details: is_current=TRUE वाली रो खोजें
         df_history = conn.query('''
             SELECT employee_name, hrms_id, pf_number, designation, unit FROM quarter_history 
             WHERE quarter_number = :q_num AND station = :station AND is_current = TRUE
@@ -300,23 +300,25 @@ def vacate_quarter(quarter_num, station, vacate_date):
         # B. Look up Hindi name/designation from Excel
         employee_details_full = search_employee_and_get_details_by_hrms(hrms_id)
         
-        # C. History Log Update
+        # C. History Log Update: is_current को FALSE और vacation_date सेट करें
         conn.session.execute(text('''
             UPDATE quarter_history 
             SET vacation_date = :vacate_date, is_current = FALSE
             WHERE quarter_number = :q_num AND station = :station AND is_current = TRUE
         '''), params={'vacate_date': vacate_date_str, 'q_num': quarter_num, 'station': station})
 
-        # D. Master Register Update
+        # D. Master Register Update: current_status को 'Vacant' सेट करें
         conn.session.execute(text('''
             UPDATE master_quarters 
             SET current_status = 'Vacant', last_occupant_id = :hrms_id
             WHERE quarter_number = :q_num AND station = :station
         '''), params={'hrms_id': hrms_id, 'q_num': quarter_num, 'station': station})
 
+        # E. COMMIT TRANSACTION
         conn.session.commit()
+        st.write(f"DEBUG: Database Commit Successful for Quarter {quarter_num}") 
 
-        # E. Generate Word Vacation Memo (Using merged details)
+        # F. Generate Word Vacation Memo (Using merged details)
         template_data = history_data.to_dict() | employee_details_full | {"quarter_number": quarter_num, "station": station}
         file_stream = generate_word_file("Vacation_Template", template_data)
 
@@ -324,6 +326,8 @@ def vacate_quarter(quarter_num, station, vacate_date):
 
     except Exception as e:
         conn.session.rollback()
+        # यह एरर लॉग आपको Streamlit logs में लाल रंग में दिखाई देना चाहिए यदि Commit विफल होता है
+        st.error(f"FATAL DB ERROR: Vacation transaction failed. Details: {e}") 
         return False, f"Vacation failed: {e}"
 
 
@@ -720,4 +724,5 @@ if __name__ == '__main__':
         os.makedirs('data')
 
     main_streamlit_ui()
+
 
