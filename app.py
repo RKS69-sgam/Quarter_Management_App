@@ -4,7 +4,7 @@ import os
 import pandas as pd
 from docx import Document 
 import io
-from sqlalchemy.sql import text # For parameterized queries and DDL execution
+from sqlalchemy.sql import text 
 import sys
 
 # ----------------------------------------------------------------------
@@ -13,7 +13,7 @@ import sys
 
 # NOTE: सुनिश्चित करें कि ये फ़ाइलें 'data' फ़ोल्डर में मौजूद हैं।
 HRMS_MASTER_FILE = "data/UNIT_MUSTER_MASTER.xlsx" 
-CSV_FILE_PATH = "data/QUARTER REGISTER.csv" 
+CSV_FILE_PATH = "data/Quarter_Register.csv" 
 
 # --- SECURITY CONFIGURATION ---
 CORRECT_PASSWORD = "Sgam@1234" 
@@ -22,7 +22,7 @@ CORRECT_PASSWORD = "Sgam@1234"
 st.set_page_config(layout="wide", page_title="रेलवे क्वार्टर प्रबंधन (PostgreSQL)")
 
 # ----------------------------------------------------------------------
-# 1. DATABASE CONNECTION & SETUP (स्थायी PostgreSQL डेटाबेस)
+# 1. DATABASE CONNECTION & SETUP 
 # ----------------------------------------------------------------------
 
 @st.cache_resource
@@ -35,7 +35,6 @@ def get_pg_connection():
         st.error(f"Database Connection Error. Check your Streamlit Secrets: {e}")
         return None
 
-# NOTE: हम कैशिंग हटा रहे हैं ताकि यह सुनिश्चित हो सके कि DB initialization हर बार चलती है।
 def initialize_database():
     """PostgreSQL में टेबल्स को बनाता है यदि वे मौजूद नहीं हैं।"""
     conn = get_pg_connection()
@@ -43,7 +42,7 @@ def initialize_database():
         return False
     
     try:
-        # 1. Master Quarters TABLE (Lowercase for PostgreSQL, using text() for DDL)
+        # 1. Master Quarters TABLE 
         conn.session.execute(text('''
             CREATE TABLE IF NOT EXISTS master_quarters (
                 quarter_number TEXT,
@@ -54,7 +53,7 @@ def initialize_database():
             )
         '''))
         
-        # 2. Quarter History TABLE (Lowercase for PostgreSQL, using text() for DDL)
+        # 2. Quarter History TABLE 
         conn.session.execute(text('''
             CREATE TABLE IF NOT EXISTS quarter_history (
                 history_id SERIAL PRIMARY KEY, 
@@ -77,8 +76,7 @@ def initialize_database():
         st.error(f"Error initializing tables: {e}")
         return False
 
-# --- NEW: Inventory Loading Function (Using CSV) ---
-# load_quarter_inventory_from_csv फ़ंक्शन (अंतिम और कठोर जाँच के साथ अद्यतन)
+# --- Inventory Loading Function (Using CSV) ---
 def load_quarter_inventory_from_csv(csv_path):
     """
     CSV फ़ाइल से क्वार्टर इन्वेंट्री लोड करता है और उन्हें master_quarters टेबल में डालता है।
@@ -87,30 +85,28 @@ def load_quarter_inventory_from_csv(csv_path):
     if conn is None: return False
 
     try:
+        # 1. CSV फ़ाइल लोड करें
         df_inventory = pd.read_csv(csv_path) 
         df_inventory.columns = df_inventory.columns.str.strip().str.upper()
-    
-        # -------------------------------------------------------------
-        # **** यह महत्वपूर्ण सुधार जोड़ें ****
+        
+        # **** Primary Key Conflict Fix: डुप्लिकेट हटाना ****
         initial_rows = len(df_inventory)
-        # QUARTER_NUMBER और STATION के संयोजन पर डुप्लिकेट हटाना
         df_inventory.drop_duplicates(subset=['QUARTER_NUMBER', 'STATION'], keep='first', inplace=True)
         deduplicated_rows = len(df_inventory)
-    
+        
         if initial_rows != deduplicated_rows:
             st.warning(f"CSV फ़ाइल में डुप्लिकेट क्वार्टर/स्टेशन संयोजन पाए गए। {initial_rows - deduplicated_rows} डुप्लिकेट रो हटा दी गईं।")
-        # -------------------------------------------------------------
-    
+        # *************************************************
+
         required_cols = ['QUARTER_NUMBER', 'STATION']
         if not all(col in df_inventory.columns for col in required_cols):
-             st.error("CSV Error: आवश्यक कॉलम नहीं मिले।")
+             st.error("CSV Error: Quarter Inventory फ़ाइल में 'QUARTER_NUMBER' और 'STATION' कॉलम नहीं मिले।")
              return False
 
-        # 2. डेटाबेस में कुल मौजूदा क्वार्टरों की संख्या जाँचें (कमिट से पहले)
+        # 2. डेटाबेस में कुल मौजूदा क्वार्टरों की संख्या जाँचें 
         existing_count = conn.query("SELECT COUNT(*) FROM master_quarters").iloc[0, 0]
         
         if existing_count > 0:
-            # st.warning(f"मास्टर क्वार्टर टेबल पहले से ही {existing_count} रिकॉर्ड्स से भरी हुई है। इन्वेंट्री लोड करना छोड़ दिया गया।")
             return True 
 
         st.info(f"CSV से {len(df_inventory)} क्वार्टर रिकॉर्ड्स लोड किए जा रहे हैं...")
@@ -121,7 +117,7 @@ def load_quarter_inventory_from_csv(csv_path):
             records_to_insert.append({
                 'q_num': str(row['QUARTER_NUMBER']).strip(),
                 'station': str(row['STATION']).strip().upper(),
-                'status': 'Vacant',
+                'status': 'Vacant', # डिफ़ॉल्ट रूप से Vacant
                 'last_id': None
             })
 
@@ -130,10 +126,9 @@ def load_quarter_inventory_from_csv(csv_path):
             VALUES (:q_num, :station, :status, :last_id)
         '''), records_to_insert)
 
-        # **** COMMIT और सत्यापन ****
         conn.session.commit()
         
-        # 4. कमिट के बाद फिर से रो संख्या जाँचें (कठोर सत्यापन)
+        # 4. कमिट के बाद फिर से रो संख्या जाँचें (सत्यापन)
         new_count = conn.query("SELECT COUNT(*) FROM master_quarters").iloc[0, 0]
         
         if new_count == len(df_inventory):
@@ -143,6 +138,7 @@ def load_quarter_inventory_from_csv(csv_path):
             st.error(f"INSERT विफल: कमिट के बाद अपेक्षित {len(df_inventory)} के बजाय केवल {new_count} रिकॉर्ड मिले।")
             return False
 
+
     except FileNotFoundError:
         st.error(f"Error: Quarter Register CSV file not found at {csv_path}.")
         return False
@@ -150,10 +146,9 @@ def load_quarter_inventory_from_csv(csv_path):
         conn.session.rollback()
         st.error(f"Error inserting inventory: {e}")
         return False
-# --- END NEW FUNCTION ---
 
 
-@st.cache_data(ttl=5) # Reduced cache time for fresh data
+@st.cache_data(ttl=5) 
 def get_all_quarters():
     """सभी क्वार्टर और उनके स्टेटस फ़ेच करता है।"""
     conn = get_pg_connection()
@@ -161,7 +156,6 @@ def get_all_quarters():
         return pd.DataFrame()
     
     try:
-        # NOTE: Lowercase table name 'master_quarters'
         df = conn.query("SELECT quarter_number, station, current_status FROM master_quarters ORDER BY station, quarter_number")
         return df
     except Exception as e:
@@ -170,7 +164,7 @@ def get_all_quarters():
 
 
 # ----------------------------------------------------------------------
-# 2. WORD FILE GENERATION (वर्ड फाइल जनरेशन) - Unchanged
+# 2. WORD FILE GENERATION (वर्ड फाइल जनरेशन) - (Unchanged)
 # ----------------------------------------------------------------------
 
 def generate_word_file(template_name, data):
@@ -221,7 +215,7 @@ def generate_word_file(template_name, data):
         return None
 
 # ----------------------------------------------------------------------
-# 3. CORE LOGIC (PostgreSQL के लिए अपडेटेड - Lowecase Table Names)
+# 3. CORE LOGIC 
 # ----------------------------------------------------------------------
 
 def allot_quarter(quarter_num, station, employee_details, allot_date):
@@ -334,7 +328,7 @@ def vacate_quarter(quarter_num, station, vacate_date):
 
 
 # ----------------------------------------------------------------------
-# 4. REPORTING (PostgreSQL के लिए अपडेटेड - Lowecase Table Names)
+# 4. REPORTING 
 # ----------------------------------------------------------------------
 
 def generate_current_status_report():
@@ -363,7 +357,13 @@ def generate_full_history_report():
         SELECT 
             quarter_number, station, employee_name, hrms_id, pf_number, designation, unit,
             CAST(allotment_date AS TEXT) AS allotment_date, 
-            COALESCE(CAST(vacation_date AS TEXT), 'CURRENTLY OCCUPIED') as vacation_date,
+            
+            -- FIX: अब केवल is_current=TRUE के लिए 'CURRENTLY OCCUPIED' दिखाएगा
+            CASE 
+                WHEN is_current = TRUE THEN 'CURRENTLY OCCUPIED'
+                ELSE COALESCE(CAST(vacation_date AS TEXT), 'N/A') 
+            END as vacation_date, 
+            
             CASE WHEN is_current = TRUE THEN 'Current Occupant' ELSE 'History Record' END as record_type
         FROM quarter_history 
         ORDER BY station, quarter_number, allotment_date DESC
@@ -373,13 +373,14 @@ def generate_full_history_report():
 
 
 # ----------------------------------------------------------------------
-# 5. EMPLOYEE DATA SEARCH & LOOKUP (Excel) - HRMS MASTER FILE
+# 5. EMPLOYEE DATA SEARCH & LOOKUP (Excel) 
 # ----------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
 def load_master_excel():
     """HRMS मास्टर Excel फ़ाइल लोड करता है।"""
     try:
+        # Load the sheet with employee data
         df_master = pd.read_excel(HRMS_MASTER_FILE, sheet_name='Master sheet')
         df_master.columns = df_master.columns.str.strip().str.upper() 
         hrms_id_col = 'HRMS ID' if 'HRMS ID' in df_master.columns else 'HRMSID'
@@ -442,7 +443,7 @@ def search_employee_and_get_details_by_hrms(hrms_id):
     }
 
 # ----------------------------------------------------------------------
-# 6. AUTHENTICATION (प्रमाणीकरण) - Unchanged
+# 6. AUTHENTICATION (प्रमाणीकरण) - (Unchanged)
 # ----------------------------------------------------------------------
 
 def check_password(password):
@@ -479,7 +480,7 @@ def authenticate_user():
     return True
 
 # ----------------------------------------------------------------------
-# 7. STREAMLIT UI (उपयोगकर्ता इंटरफ़ेस)
+# 7. STREAMLIT UI 
 # ----------------------------------------------------------------------
 
 def main_streamlit_ui():
@@ -507,8 +508,7 @@ def main_streamlit_ui():
         st.session_state.quarter_df = get_all_quarters()
         
     if st.session_state.quarter_df.empty and 'current_status' not in st.session_state.quarter_df.columns:
-        st.error("Cannot load quarter data. Please check logs for PostgreSQL connection issues.")
-        # We skip return here to show the rest of the UI structure
+        st.warning("Cannot load quarter data from database.")
 
     if 'search_results' not in st.session_state:
         st.session_state.search_results = pd.DataFrame()
@@ -720,6 +720,3 @@ if __name__ == '__main__':
         os.makedirs('data')
 
     main_streamlit_ui()
-
-
-
