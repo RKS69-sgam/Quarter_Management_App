@@ -499,9 +499,9 @@ def main_streamlit_ui():
         return 
         
     # 3. RUN INVENTORY LOADING ONCE HERE
-    if not load_quarter_inventory_from_csv(CSV_FILE_PATH):
-        st.error("क्वार्टर इन्वेंट्री लोड नहीं हो सकी। कृपया CSV फ़ाइल और कॉलम नाम जांचें।")
-        return 
+    #if not load_quarter_inventory_from_csv(CSV_FILE_PATH):
+    #    st.error("क्वार्टर इन्वेंट्री लोड नहीं हो सकी। कृपया CSV फ़ाइल और कॉलम नाम जांचें।")
+    #    return 
 
     # 4. Session State Initialization and Data Load
     if 'quarter_df' not in st.session_state or st.button("Refresh Status", key='refresh_status'):
@@ -720,3 +720,4 @@ if __name__ == '__main__':
         os.makedirs('data')
 
     main_streamlit_ui()
+
