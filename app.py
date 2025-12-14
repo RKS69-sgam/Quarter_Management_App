@@ -285,7 +285,7 @@ def vacate_quarter(quarter_num, station, vacate_date):
     vacate_date_str = vacate_date.strftime('%Y-%m-%d')
 
     try:
-        # A. Get current occupant details: is_current=TRUE वाली रो खोजें
+        # A. Get current occupant details: is_current=TRUE वाली रो खोजें (मेमो जेनरेट करने के लिए)
         df_history = conn.query('''
             SELECT employee_name, hrms_id, pf_number, designation, unit FROM quarter_history 
             WHERE quarter_number = :q_num AND station = :station AND is_current = TRUE
@@ -297,18 +297,18 @@ def vacate_quarter(quarter_num, station, vacate_date):
         history_data = df_history.iloc[0]
         hrms_id = history_data['hrms_id']
         
-        # B. Look up Hindi name/designation from Excel
+        # B. Look up Hindi name/designation from Excel (मेमो जेनरेट करने के लिए)
         employee_details_full = search_employee_and_get_details_by_hrms(hrms_id)
         
         # C. History Log Update: is_current को FALSE और vacation_date सेट करें
-        conn.session.execute(text('''
+        history_result = conn.session.execute(text('''
             UPDATE quarter_history 
             SET vacation_date = :vacate_date, is_current = FALSE
             WHERE quarter_number = :q_num AND station = :station AND is_current = TRUE
         '''), params={'vacate_date': vacate_date_str, 'q_num': quarter_num, 'station': station})
 
         # D. Master Register Update: current_status को 'Vacant' सेट करें
-        conn.session.execute(text('''
+        master_result = conn.session.execute(text('''
             UPDATE master_quarters 
             SET current_status = 'Vacant', last_occupant_id = :hrms_id
             WHERE quarter_number = :q_num AND station = :station
@@ -316,7 +316,12 @@ def vacate_quarter(quarter_num, station, vacate_date):
 
         # E. COMMIT TRANSACTION
         conn.session.commit()
+        
+        # **** DEBUGGING LINES ADDED ****
+        st.write(f"DEBUG: History Rows Updated (Expected 1): {history_result.rowcount}")
+        st.write(f"DEBUG: Master Rows Updated (Expected 1): {master_result.rowcount}")
         st.write(f"DEBUG: Database Commit Successful for Quarter {quarter_num}") 
+        # ******************************
 
         # F. Generate Word Vacation Memo (Using merged details)
         template_data = history_data.to_dict() | employee_details_full | {"quarter_number": quarter_num, "station": station}
@@ -326,10 +331,9 @@ def vacate_quarter(quarter_num, station, vacate_date):
 
     except Exception as e:
         conn.session.rollback()
-        # यह एरर लॉग आपको Streamlit logs में लाल रंग में दिखाई देना चाहिए यदि Commit विफल होता है
+        # यदि Commit विफल होता है, तो यह एरर लॉग महत्वपूर्ण होगा
         st.error(f"FATAL DB ERROR: Vacation transaction failed. Details: {e}") 
         return False, f"Vacation failed: {e}"
-
 
 # ----------------------------------------------------------------------
 # 4. REPORTING 
@@ -724,5 +728,6 @@ if __name__ == '__main__':
         os.makedirs('data')
 
     main_streamlit_ui()
+
 
 
