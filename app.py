@@ -87,10 +87,20 @@ def load_quarter_inventory_from_csv(csv_path):
     if conn is None: return False
 
     try:
-        # 1. Excel फ़ाइल लोड करें (अगर यह फ़ेल होता है तो नीचे का कोड नहीं चलता)
         df_inventory = pd.read_csv(csv_path) 
         df_inventory.columns = df_inventory.columns.str.strip().str.upper()
-        
+    
+        # -------------------------------------------------------------
+        # **** यह महत्वपूर्ण सुधार जोड़ें ****
+        initial_rows = len(df_inventory)
+        # QUARTER_NUMBER और STATION के संयोजन पर डुप्लिकेट हटाना
+        df_inventory.drop_duplicates(subset=['QUARTER_NUMBER', 'STATION'], keep='first', inplace=True)
+        deduplicated_rows = len(df_inventory)
+    
+        if initial_rows != deduplicated_rows:
+            st.warning(f"CSV फ़ाइल में डुप्लिकेट क्वार्टर/स्टेशन संयोजन पाए गए। {initial_rows - deduplicated_rows} डुप्लिकेट रो हटा दी गईं।")
+        # -------------------------------------------------------------
+    
         required_cols = ['QUARTER_NUMBER', 'STATION']
         if not all(col in df_inventory.columns for col in required_cols):
              st.error("CSV Error: आवश्यक कॉलम नहीं मिले।")
@@ -710,5 +720,6 @@ if __name__ == '__main__':
         os.makedirs('data')
 
     main_streamlit_ui()
+
 
 
