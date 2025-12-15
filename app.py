@@ -364,7 +364,7 @@ def generate_word_file(template_name, data):
     
     template_path = f'{template_name}.docx'
     
-    # FIX 2: यदि टेम्पलेट फ़ाइल मौजूद नहीं है तो एक स्पष्ट त्रुटि लौटाएँ
+    # FIX: यदि टेम्पलेट फ़ाइल मौजूद नहीं है तो एक स्पष्ट त्रुटि लौटाएँ
     if not os.path.exists(template_path):
         st.error(f"Template file not found: {template_path}. Ensure templates are present in the app's root directory.")
         return None
@@ -372,7 +372,7 @@ def generate_word_file(template_name, data):
     try:
         document = Document(template_path)
         
-        # हिंदी नामों के लिए fallback सहित सभी प्रतिस्थापन
+        # FIX: PF_Number केसिंग को रोबस्ट किया गया है।
         replacements = {
             '{{DATE}}': current_date_str_letter,
             '{{QUARTER_NUMBER}}': data.get('quarter_number', 'NA'),
@@ -380,7 +380,7 @@ def generate_word_file(template_name, data):
             '{{EMPLOYEE_NAME}}': data.get('employee_name_hindi', data.get('employee_name_english', 'NA')), 
             '{{DESIGNATION}}': data.get('designation_hindi', data.get('designation_english', 'NA')), 
             '{{HRMS_ID}}': data.get('hrms_id', 'NA'),
-            '{{PF_NUMBER}}': data.get('pf_number', 'NA'),
+            '{{PF_NUMBER}}': data.get('PF_NUMBER', data.get('pf_number', 'NA')), # FIX: दोनों केसिंग को कवर करने का प्रयास
             '{{UNIT}}': data.get('unit', 'NA'),
         }
 
@@ -406,7 +406,7 @@ def generate_word_file(template_name, data):
         return file_stream
 
     except Exception as e:
-        st.error(f"Failed to generate Word file: {e}")
+        st.error(f"Failed to generate Word file. Check template integrity. Error: {e}")
         return None
 
 # ----------------------------------------------------------------------
@@ -429,14 +429,16 @@ def allot_quarter(quarter_num, station, hrms_id, allot_date, employee_details):
         batch = db.batch()
         
         # 1. Check for Duplicate Allotment (Employee already has a quarter)
+        # NOTE: यदि यह जांच विफल हो रही है (जैसा कि RMOTSP error में हुआ), तो डेटाबेस में 
+        # उस HRMS ID के लिए is_current: True सेट किया गया कोई रिकॉर्ड दूषित है।
         docs_dup = db.collection(QUARTER_HISTORY_COLLECTION)\
                      .where('hrms_id', '==', clean_hrms_id)\
                      .where('is_current', '==', True).limit(1).get()
         if docs_dup:
-            # FIX: If another quarter is found, use the correct quarter number in the error message
+            # FIX: डुप्लीकेट रिकॉर्ड से सही क्वार्टर की जानकारी खींचना
             dup_q_num = docs_dup[0].to_dict().get('quarter_number', 'N/A')
             dup_station = docs_dup[0].to_dict().get('station', 'N/A')
-            return False, f"Error: Employee ({hrms_id}) already occupies quarter {dup_q_num} at {dup_station}."
+            return False, f"Error: Employee ({hrms_id}) already occupies quarter {dup_q_num} at {dup_station}. Please ensure the previous quarter has been vacated in the system (is_current: False)."
 
         # 2. Check quarter status
         q_doc = q_doc_ref.get()
@@ -481,7 +483,7 @@ def allot_quarter(quarter_num, station, hrms_id, allot_date, employee_details):
         # C. Generate Word Allotment Letter
         file_stream = generate_word_file("Allotment_Template", employee_details | {"quarter_number": quarter_num, "station": station})
         
-        # FIX 2: अगर लेटर जेनरेट नहीं होता है, तो स्पष्ट त्रुटि संदेश दें
+        # FIX: अगर लेटर जेनरेट नहीं होता है, तो स्पष्ट त्रुटि संदेश दें
         if file_stream is None:
             return False, f"Allotment successful, but **Error generating Allotment Letter** for {quarter_num} at {station}. Check if the 'Allotment_Template.docx' file exists."
 
@@ -507,7 +509,6 @@ def vacate_quarter(quarter_num, station, vacate_date):
         batch = db.batch()
         
         # A. Get current occupant history record
-        # Note: 'station' और 'quarter_number' के साथ 'is_current' = True पर फ़िल्टर करने के लिए Firestore में Compound Index की आवश्यकता हो सकती है।
         docs_history = db.collection(QUARTER_HISTORY_COLLECTION)\
                          .where('quarter_number', '==', quarter_num)\
                          .where('station', '==', station)\
@@ -557,7 +558,7 @@ def vacate_quarter(quarter_num, station, vacate_date):
         template_data = employee_details_full | {"quarter_number": quarter_num, "station": station}
         file_stream = generate_word_file("Vacation_Template", template_data)
         
-        # FIX 2: अगर लेटर जेनरेट नहीं होता है, तो स्पष्ट त्रुटि संदेश दें
+        # FIX: अगर लेटर जेनरेट नहीं होता है, तो स्पष्ट त्रुटि संदेश दें
         if file_stream is None:
             return False, f"Vacation successful, but **Error generating Vacation Memo** for {quarter_num} at {station}. Check if the 'Vacation_Template.docx' file exists."
 
@@ -701,7 +702,7 @@ def authenticate_user():
                 st.warning("अलॉट करने के लिए कोई खाली क्वार्टर उपलब्ध नहीं है।")
             
             if not vacant_quarters.empty:
-                # FIX 1: रोबस्ट सेलेक्शन के लिए इंडेक्स को रीसेट करें
+                # FIX 1: रोबस्ट सेलेक्शन के लिए इंडेक्स और कॉलम को रीसेट/सेट करें
                 vacant_quarters = vacant_quarters.reset_index(drop=True).copy()
                 vacant_quarters['Display'] = vacant_quarters['quarter_number'] + ' (' + vacant_quarters['station'] + ')'
                 display_list = vacant_quarters['Display'].tolist()
@@ -772,7 +773,7 @@ def authenticate_user():
                             
                             if success:
                                 st.success("🎉 अलॉटमेंट सफलतापूर्वक पूरा हुआ!")
-                                # result अब file_stream है, जो None नहीं हो सकता (क्योंकि allot_quarter में चेक हो गया है)
+                                # result अब file_stream है
                                 st.session_state.allot_download_data = {
                                     "stream": result,
                                     "filename": f"Allotment_Letter_{selected_q_num}_{selected_hrms_id}.docx"
@@ -815,7 +816,7 @@ def authenticate_user():
             st.session_state.vacate_download_data = None
                 
             if not occupied_quarters.empty:
-                # FIX 1: रोबस्ट सेलेक्शन के लिए इंडेक्स को रीसेट करें
+                # FIX 1: रोबस्ट सेलेक्शन के लिए इंडेक्स और कॉलम को रीसेट/सेट करें
                 occupied_quarters = occupied_quarters.reset_index(drop=True).copy()
                 occupied_quarters['Display'] = occupied_quarters['quarter_number'] + ' (' + occupied_quarters['station'] + ')'
                 display_list_vacate = occupied_quarters['Display'].tolist()
