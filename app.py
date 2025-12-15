@@ -22,6 +22,7 @@ QUARTER_MASTER_COLLECTION = "master_quarters"
 QUARTER_HISTORY_COLLECTION = "quarter_history" 
 
 # --- SECURITY CONFIGURATION ---
+# पासवर्ड secrets.toml से लोड करें, डिफ़ॉल्ट 'default_password'
 CORRECT_PASSWORD = st.secrets.get("CORRECT_PASSWORD", "default_password")
 # ------------------------------
 
@@ -81,6 +82,7 @@ def clean_data_string(s):
 def load_initial_data_to_firestore():
     """
     CSV से Master Quarters और History को लोड करता है (एक ही पास में)।
+    यह केवल तब चलता है जब Master Collection खाली हो।
     """
     if db is None: return False
     
@@ -93,8 +95,6 @@ def load_initial_data_to_firestore():
             df_inventory = pd.read_csv(INVENTORY_CSV_PATH)
             df_inventory.columns = df_inventory.columns.str.strip().str.upper()
             
-            required_cols = ['QUARTER_NUMBER', 'STATION', 'IS_OCCUPIED', 'HRMS_ID', 'ALLOTMENT_DATE', 'EMPLOYEE_NAME']
-            # केवल 'QUARTER_NUMBER' और 'STATION' की जांच करते हैं, क्योंकि बाकी ऑक्यूपेंसी के लिए हैं
             if not all(col in df_inventory.columns for col in ['QUARTER_NUMBER', 'STATION']):
                  st.error("CSV Error: 'QUARTER_NUMBER' और 'STATION' कॉलम आवश्यक हैं।")
                  return False
@@ -131,8 +131,8 @@ def load_initial_data_to_firestore():
                 if is_occupied:
                     try:
                         allot_date_str = str(row.get('ALLOTMENT_DATE')).strip()
-                        # YYYY-MM-DD प्रारूप की उम्मीद है
-                        allot_date_obj = datetime.datetime.strptime(allot_date_str, '%Y-%m-%d').date() 
+                        # FIX: Firestore में लिखने के लिए datetime.datetime का उपयोग करें
+                        allot_date_obj = datetime.datetime.strptime(allot_date_str, '%Y-%m-%d') 
                     except (ValueError, TypeError):
                          st.warning(f"Invalid ALLOTMENT_DATE format for quarter {q_doc_id}. Skipping history.")
                          continue
@@ -145,7 +145,7 @@ def load_initial_data_to_firestore():
                         'pf_number': str(row.get('PF_NUMBER', 'NA')).strip(), 
                         'designation': str(row.get('DESIGNATION', 'NA')).strip(), 
                         'unit': str(row.get('UNIT', 'NA')).strip(),
-                        'allotment_date': allot_date_obj,
+                        'allotment_date': allot_date_obj, # अब यह Firestore के लिए मान्य है
                         'vacation_date': None,
                         'is_current': True,
                         'created_at': firestore.SERVER_TIMESTAMP
@@ -223,10 +223,18 @@ def get_quarter_history_df():
         if 'is_current' not in df.columns:
              df['is_current'] = False
         
+        # DATE फ़ील्ड को स्ट्रिंग में बदलें (रिपोर्टिंग के लिए)
+        # Firestore Timestamps/datetime.datetime को YYYY-MM-DD फॉर्मेट में बदलें
+        date_format = '%Y-%m-%d'
+        
         if 'allotment_date' in df.columns:
-             df['allotment_date'] = df['allotment_date'].apply(lambda x: x.strftime('%Y-%m-%d') if isinstance(x, (date, datetime.date)) else str(x))
+             df['allotment_date'] = df['allotment_date'].apply(
+                 lambda x: x.strftime(date_format) if isinstance(x, datetime.datetime) else (x.date().strftime(date_format) if hasattr(x, 'date') else str(x))
+             )
         if 'vacation_date' in df.columns:
-             df['vacation_date'] = df['vacation_date'].apply(lambda x: x.strftime('%Y-%m-%d') if isinstance(x, (date, datetime.date)) else str(x))
+             df['vacation_date'] = df['vacation_date'].apply(
+                 lambda x: x.strftime(date_format) if isinstance(x, datetime.datetime) else (x.date().strftime(date_format) if hasattr(x, 'date') else str(x))
+             )
              
         for col in required_cols:
              if col not in df.columns:
@@ -249,21 +257,21 @@ def search_employee_details_from_firebase(search_term):
     search_term = str(search_term).strip()
     results = []
 
-    # HRMS ID से exact मैच की जाँच करें
+    # 1. HRMS ID से exact मैच की जाँच करें
     try:
         docs_id = db.collection(EMPLOYEE_COLLECTION)\
                     .where('HRMS ID', '==', search_term)\
                     .limit(1).get()
         if docs_id:
             results.append(docs_id[0].to_dict())
-            
     except Exception:
         pass
         
-    # नाम से खोज: 'starts with'
+    # 2. नाम से खोज: 'starts with'
     if not results and len(search_term) >= 3:
         try:
-             start_key = search_term.title() # Capitalization for better match
+             # Title case search for Employee Name
+             start_key = search_term.title() 
              end_key = start_key + '\uf8ff' 
 
              docs_name = db.collection(EMPLOYEE_COLLECTION)\
@@ -304,6 +312,7 @@ def get_employee_details_by_hrms_id(hrms_id):
             
         record = docs[0].to_dict()
         
+        # सुनिश्चित करें कि सभी आवश्यक कुंजियाँ मौजूद हैं
         return {
             'hrms_id': hrms_id_str,
             'employee_name_english': str(record.get('Employee Name', 'NA')),
@@ -328,7 +337,7 @@ def generate_word_file(template_name, data):
     
     template_path = f'{template_name}.docx'
     if not os.path.exists(template_path):
-        st.error(f"Template file not found: {template_path}.")
+        st.error(f"Template file not found: {template_path}. Ensure templates are present.")
         return None
 
     try:
@@ -406,6 +415,12 @@ def allot_quarter(quarter_num, station, hrms_id, allot_date, employee_details):
         })
 
         # B. History Log Insert
+        # FIX: Ensure allot_date is datetime.datetime object for Firebase
+        if isinstance(allot_date, datetime.date) and not isinstance(allot_date, datetime.datetime):
+             allot_date_obj = datetime.datetime.combine(allot_date, datetime.time())
+        else:
+             allot_date_obj = allot_date
+
         history_data = {
             'quarter_number': quarter_num, 
             'station': station, 
@@ -414,7 +429,7 @@ def allot_quarter(quarter_num, station, hrms_id, allot_date, employee_details):
             'designation': employee_details['designation_english'], 
             'unit': employee_details['unit'], 
             'employee_name': employee_details['employee_name_english'], 
-            'allotment_date': allot_date,
+            'allotment_date': allot_date_obj,
             'vacation_date': None,
             'is_current': True,
             'created_at': firestore.SERVER_TIMESTAMP
@@ -460,14 +475,20 @@ def vacate_quarter(quarter_num, station, vacate_date):
         # B. Look up details for the letter
         employee_details_full = get_employee_details_by_hrms_id(hrms_id)
         if employee_details_full is None:
-            employee_details_full = history_data # Use history if lookup fails
+            employee_details_full = history_data 
             employee_details_full['employee_name_english'] = history_data.get('employee_name', 'NA')
             employee_details_full['designation_english'] = history_data.get('designation', 'NA')
             st.warning("कर्मचारी विवरण (Firebase) नहीं मिला। मेमो में इतिहास डेटा का उपयोग किया जाएगा।")
 
+        # FIX: Ensure vacate_date is datetime.datetime object for Firebase
+        if isinstance(vacate_date, datetime.date) and not isinstance(vacate_date, datetime.datetime):
+             vacate_date_obj = datetime.datetime.combine(vacate_date, datetime.time())
+        else:
+             vacate_date_obj = vacate_date
+
         # C. History Log Update
         batch.update(history_doc.reference, {
-            'vacation_date': vacate_date,
+            'vacation_date': vacate_date_obj,
             'is_current': False,
             'updated_at': firestore.SERVER_TIMESTAMP
         })
@@ -583,7 +604,7 @@ def authenticate_user():
             st.error("Firebase DB connection failed. Check your Streamlit Secrets.")
             st.stop()
         
-        # CSV से डेटा लोड करने का प्रयास
+        # CSV से डेटा लोड करने का प्रयास (केवल एक बार जब Master Collection खाली हो)
         load_initial_data_to_firestore() 
 
         # --- SIDEBAR CONTROLS ---
