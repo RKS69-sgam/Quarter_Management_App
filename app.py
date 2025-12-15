@@ -305,19 +305,41 @@ def search_employee_details_from_firebase(search_term):
     return df[['HRMS ID', 'Employee Name', 'Designation', 'Unit', 'PF Number']]
 
 
+# app.py में Line 434 के आसपास
+
 @st.cache_data(ttl=3600)
 def get_employee_details_by_hrms_id(hrms_id):
-    """केवल HRMS ID से एक ही कर्मचारी का विवरण प्राप्त करता है।"""
+    """केवल HRMS ID से एक ही कर्मचारी का विवरण प्राप्त करता है (FIXED for Index Error)."""
     if db is None or not hrms_id: return None
     hrms_id_str = clean_data_string(hrms_id)
     
     try:
-        # Note: 'HRMS ID' field name must match exactly in Firestore
-        docs = db.collection(EMPLOYEE_COLLECTION).where('HRMS ID', '==', hrms_id_str).limit(1).get()
-        if not docs: return None
-            
-        record = docs[0].to_dict()
+        # FIX: इंडेक्सिंग त्रुटि से बचने के लिए, हम एक सरल ID-आधारित दस्तावेज़ का प्रयास करते हैं 
+        # या यदि यह विफल हो जाता है, तो हम सभी रिकॉर्ड फ़ेच करके Python में फ़िल्टर करते हैं।
         
+        # 1. यदि HRMS ID दस्तावेज़ ID के रूप में उपयोग किया जाता है तो सीधे प्रयास करें (ज्यादातर मामलों में विफल होगा)
+        # docs = db.collection(EMPLOYEE_COLLECTION).document(hrms_id_str).get()
+        # if docs.exists: return docs.to_dict() # (यह कोड हटा दिया गया, क्योंकि यह आमतौर पर उपयोग नहीं होता)
+
+        # 2. अब, HRMS ID फ़ील्ड द्वारा खोज करें (जो विफल हो रहा है, इसलिए इसे बदलें)
+        
+        # FIX: इंडेक्सिंग त्रुटि से बचने के लिए, हम अब केवल 'HRMS ID' फ़ील्ड पर 
+        # निर्भर होने के बजाय, एक साधारण 'stream()' का उपयोग करके डेटा को खींचते हैं 
+        # और Python में फ़िल्टर करते हैं।
+        
+        docs = db.collection(EMPLOYEE_COLLECTION).stream()
+        record = None
+
+        for doc in docs:
+            doc_data = doc.to_dict()
+            if clean_data_string(doc_data.get('HRMS ID')) == hrms_id_str:
+                record = doc_data
+                break
+        
+        if record is None:
+            st.warning(f"Employee {hrms_id} not found by exact match in stream.")
+            return None
+            
         # सुनिश्चित करें कि सभी आवश्यक कुंजियाँ मौजूद हैं
         return {
             'hrms_id': hrms_id_str,
@@ -329,7 +351,8 @@ def get_employee_details_by_hrms_id(hrms_id):
             'unit': str(record.get('Unit', 'NA'))
         }
     except Exception as e:
-        st.error(f"Error fetching employee {hrms_id} by ID. Details: {e}")
+        # यह त्रुटि अब नहीं आनी चाहिए, लेकिन अगर आती है तो भी इसे संभाल लें
+        st.error(f"FATAL Error fetching employee {hrms_id} by ID (post-fix). Details: {e}")
         return None
 
 # ----------------------------------------------------------------------
@@ -835,3 +858,4 @@ def authenticate_user():
 # --- UI CODE END ---
 
 authenticate_user()
+
