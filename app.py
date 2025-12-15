@@ -132,21 +132,39 @@ def load_initial_data_to_firestore():
 @st.cache_data(ttl=5) 
 def get_all_quarters():
     """Firestore से सभी क्वार्टर और उनके स्टेटस फ़ेच करता है।"""
-    if db is None: return pd.DataFrame()
+    if db is None:
+        # DB विफल होने पर भी कॉलम के साथ खाली DF लौटाएँ
+        return pd.DataFrame(columns=['quarter_number', 'station', 'current_status'])
     
     try:
         docs = db.collection(QUARTER_MASTER_COLLECTION).stream()
         data = [doc.to_dict() for doc in docs]
+        
+        # 🚨 सुरक्षा जांच: यदि कोई डेटा नहीं है, तो आवश्यक कॉलम के साथ एक खाली DF लौटाएँ
+        if not data:
+            return pd.DataFrame(columns=['quarter_number', 'station', 'current_status'])
+            
         df = pd.DataFrame(data) 
         
+        # सुनिश्चित करें कि 'current_status' मौजूद है (डिफ़ॉल्ट मान दें यदि किसी दस्तावेज़ में वह फ़ील्ड छूट गया हो)
+        if 'current_status' not in df.columns:
+            df['current_status'] = 'Vacant'
+        
+        # सभी आवश्यक कॉलम सुनिश्चित करें (यदि कोई दस्तावेज़ अधूरा है)
+        required_cols = ['quarter_number', 'station', 'current_status']
+        for col in required_cols:
+            if col not in df.columns:
+                df[col] = 'N/A' # मिसिंग कॉलम को N/A से भरें
+                
         # DataFrame को स्टेशन और क्वार्टर_नंबर से छाँटें
-        if not df.empty:
-            df = df.sort_values(by=['station', 'quarter_number']).reset_index(drop=True)
-        return df
+        df = df.sort_values(by=['station', 'quarter_number']).reset_index(drop=True)
+            
+        return df[required_cols] # केवल आवश्यक कॉलम लौटाएँ
         
     except Exception as e:
         st.error(f"Error fetching quarters from Firestore: {e}")
-        return pd.DataFrame()
+        # त्रुटि पर भी कॉलम के साथ खाली DF लौटाएँ
+        return pd.DataFrame(columns=['quarter_number', 'station', 'current_status'])
 
 @st.cache_data(ttl=5)
 def get_quarter_history_df():
@@ -658,3 +676,4 @@ def authenticate_user():
 # --- UI CODE END ---
 
 authenticate_user()
+
