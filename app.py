@@ -224,7 +224,6 @@ def get_quarter_history_df():
              df['is_current'] = False
         
         # DATE फ़ील्ड को स्ट्रिंग में बदलें (रिपोर्टिंग के लिए)
-        # Firestore Timestamps/datetime.datetime को YYYY-MM-DD फॉर्मेट में बदलें
         date_format = '%Y-%m-%d'
         
         if 'allotment_date' in df.columns:
@@ -259,6 +258,7 @@ def search_employee_details_from_firebase(search_term):
 
     # 1. HRMS ID से exact मैच की जाँच करें
     try:
+        # Note: 'HRMS ID' field name must match exactly in Firestore
         docs_id = db.collection(EMPLOYEE_COLLECTION)\
                     .where('HRMS ID', '==', search_term)\
                     .limit(1).get()
@@ -307,6 +307,7 @@ def get_employee_details_by_hrms_id(hrms_id):
     hrms_id_str = clean_data_string(hrms_id)
     
     try:
+        # Note: 'HRMS ID' field name must match exactly in Firestore
         docs = db.collection(EMPLOYEE_COLLECTION).where('HRMS ID', '==', hrms_id_str).limit(1).get()
         if not docs: return None
             
@@ -323,7 +324,8 @@ def get_employee_details_by_hrms_id(hrms_id):
             'unit': str(record.get('Unit', 'NA'))
         }
     except Exception as e:
-        st.error(f"Error fetching employee {hrms_id} by ID: {e}")
+        # पिछले सेशन में आई त्रुटि को रोकने के लिए मैसेज को सामान्य किया गया
+        st.error(f"Error fetching employee {hrms_id} by ID: Check employee collection structure.")
         return None
 
 # ----------------------------------------------------------------------
@@ -475,6 +477,7 @@ def vacate_quarter(quarter_num, station, vacate_date):
         # B. Look up details for the letter
         employee_details_full = get_employee_details_by_hrms_id(hrms_id)
         if employee_details_full is None:
+            # यदि एम्प्लॉई लुकअप विफल होता है, तो सीधे हिस्ट्री डेटा का उपयोग करें
             employee_details_full = history_data 
             employee_details_full['employee_name_english'] = history_data.get('employee_name', 'NA')
             employee_details_full['designation_english'] = history_data.get('designation', 'NA')
@@ -503,6 +506,7 @@ def vacate_quarter(quarter_num, station, vacate_date):
         st.cache_data.clear()
         
         # E. Generate Word Vacation Memo
+        # combine dicts for template data
         template_data = employee_details_full | {"quarter_number": quarter_num, "station": station}
         file_stream = generate_word_file("Vacation_Template", template_data)
 
@@ -578,6 +582,13 @@ def authenticate_user():
     
     if 'authenticated' not in st.session_state:
         st.session_state.authenticated = False
+    
+    # Session state initialization for downloads (FIX for StreamlitAPIException)
+    if 'allot_download_data' not in st.session_state:
+        st.session_state.allot_download_data = None
+    if 'vacate_download_data' not in st.session_state:
+        st.session_state.vacate_download_data = None
+
 
     if not st.session_state.authenticated:
         
@@ -611,6 +622,8 @@ def authenticate_user():
         st.sidebar.markdown("---")
         if st.sidebar.button("🚪 Logout"):
             st.session_state.authenticated = False
+            st.session_state.allot_download_data = None
+            st.session_state.vacate_download_data = None
             st.rerun()
 
         # --- UI TABS ---
@@ -627,7 +640,10 @@ def authenticate_user():
             
             if vacant_quarters.empty:
                 st.warning("अलॉट करने के लिए कोई खाली क्वार्टर उपलब्ध नहीं है।")
-                
+            
+            # डाउनलोड बटन के लिए स्टेट क्लियर करें
+            st.session_state.allot_download_data = None 
+
             if not vacant_quarters.empty:
                 vacant_quarters['Display'] = vacant_quarters['quarter_number'] + ' (' + vacant_quarters['station'] + ')'
                 
@@ -688,20 +704,31 @@ def authenticate_user():
                             
                             if success:
                                 st.success("🎉 अलॉटमेंट सफलतापूर्वक पूरा हुआ!")
-                                file_stream = result
-                                st.download_button(
-                                    label="डाउनलोड अलॉटमेंट लेटर (.docx)",
-                                    data=file_stream,
-                                    file_name=f"Allotment_Letter_{selected_q_num}_{selected_hrms_id}.docx",
-                                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                    key='download_allotment'
-                                )
-                                st.cache_data.clear()
-                                st.rerun()
+                                # FIX: परिणाम को सेशन स्टेट में स्टोर करें, डाउनलोड बटन फॉर्म के बाहर होगा।
+                                st.session_state.allot_download_data = {
+                                    "stream": result,
+                                    "filename": f"Allotment_Letter_{selected_q_num}_{selected_hrms_id}.docx"
+                                }
+                                st.rerun() # Rerender to show download button
                             else:
                                 st.error(result)
                         else:
                             st.error("कृपया एक खाली क्वार्टर चुनें और सुनिश्चित करें कि कर्मचारी विवरण सफलतापूर्वक प्राप्त हुआ है।")
+
+            # FIX: डाउनलोड बटन फॉर्म के बाहर!
+            if st.session_state.allot_download_data:
+                dl_data = st.session_state.allot_download_data
+                st.markdown("---")
+                st.download_button(
+                    label="डाउनलोड अलॉटमेंट लेटर (.docx)",
+                    data=dl_data["stream"],
+                    file_name=dl_data["filename"],
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    key='download_allotment_final'
+                )
+                # डाउनलोड दिखाने के बाद डेटा साफ़ करें
+                st.session_state.allot_download_data = None 
+
 
         # -----------------------------------------------------------
         # II. Vacate Quarter Tab
@@ -714,6 +741,9 @@ def authenticate_user():
             
             if occupied_quarters.empty:
                 st.warning("खाली करने के लिए कोई ऑक्यूपाइड क्वार्टर नहीं है।")
+
+            # डाउनलोड बटन के लिए स्टेट क्लियर करें
+            st.session_state.vacate_download_data = None
                 
             if not occupied_quarters.empty:
                 occupied_quarters['Display'] = occupied_quarters['quarter_number'] + ' (' + occupied_quarters['station'] + ')'
@@ -737,18 +767,29 @@ def authenticate_user():
                             
                             if success:
                                 st.success("🎉 वेकेशन सफलतापूर्वक पूरा हुआ!")
-                                file_stream = result
-                                st.download_button(
-                                    label="डाउनलोड वेकेशन मेमो (.docx)",
-                                    data=file_stream,
-                                    file_name=f"Vacation_Memo_{selected_q_num}_{selected_station}.docx",
-                                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                    key='download_vacation'
-                                )
-                                st.cache_data.clear()
-                                st.rerun()
+                                # FIX: परिणाम को सेशन स्टेट में स्टोर करें, डाउनलोड बटन फॉर्म के बाहर होगा।
+                                st.session_state.vacate_download_data = {
+                                    "stream": result,
+                                    "filename": f"Vacation_Memo_{selected_q_num}_{selected_station}.docx"
+                                }
+                                st.rerun() # Rerender to show download button
                             else:
                                 st.error(result)
+
+            # FIX: डाउनलोड बटन फॉर्म के बाहर!
+            if st.session_state.vacate_download_data:
+                 dl_data = st.session_state.vacate_download_data
+                 st.markdown("---")
+                 st.download_button(
+                     label="डाउनलोड वेकेशन मेमो (.docx)",
+                     data=dl_data["stream"],
+                     file_name=dl_data["filename"],
+                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                     key='download_vacation_final'
+                 )
+                 # डाउनलोड दिखाने के बाद डेटा साफ़ करें
+                 st.session_state.vacate_download_data = None
+
 
         # -----------------------------------------------------------
         # III. Report Tab
