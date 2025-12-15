@@ -17,6 +17,7 @@ import uuid
 
 # NOTE: सुनिश्चित करें कि ये फ़ाइलें /data फ़ोल्डर में मौजूद हैं।
 INVENTORY_CSV_PATH = "data/Quarter_Register.csv" 
+# FIX 1: कलेक्शन नाम को वापस "employees" पर सेट किया गया
 EMPLOYEE_COLLECTION = "employees"          
 QUARTER_MASTER_COLLECTION = "master_quarters"
 QUARTER_HISTORY_COLLECTION = "quarter_history" 
@@ -251,7 +252,7 @@ def get_quarter_history_df():
 
 @st.cache_data(ttl=3600)
 def search_employee_details_from_firebase(search_term):
-    """Firebase में नाम या HRMS ID द्वारा कर्मचारी खोजता है।"""
+    """Firebase में नाम या HRMS ID द्वारा कर्मचारी खोजता है (Robust version - client-side filtering)."""
     if db is None or not search_term: return pd.DataFrame()
     search_term = str(search_term).strip()
     results = []
@@ -267,25 +268,29 @@ def search_employee_details_from_firebase(search_term):
     except Exception:
         pass
         
-    # 2. नाम से खोज: 'starts with'
+    # 2. नाम से खोज: (Indicated fix: Use client-side filtering to bypass index errors)
     if not results and len(search_term) >= 3:
         try:
-             # Title case search for Employee Name
-             start_key = search_term.title() 
-             end_key = start_key + '\uf8ff' 
-
-             docs_name = db.collection(EMPLOYEE_COLLECTION)\
-                           .where('Employee Name', '>=', start_key)\
-                           .where('Employee Name', '<=', end_key)\
-                           .limit(20).get()
-
-             for doc in docs_name:
+             # FIX 2: Firestore इंडेक्स की आवश्यकता से बचने के लिए सभी रिकॉर्ड फ़ेच करें
+             docs_all = db.collection(EMPLOYEE_COLLECTION).stream() 
+             
+             search_term_lower = search_term.lower()
+             
+             for doc in docs_all:
                  doc_data = doc.to_dict()
-                 if doc_data.get('HRMS ID') not in [r.get('HRMS ID') for r in results]:
-                     results.append(doc_data)
-
+                 # सुनिश्चित करें कि 'Employee Name' मौजूद है और उसे lowercase में बदलें
+                 employee_name = doc_data.get('Employee Name', '').lower()
+                 
+                 # यदि नाम सर्च टर्म से शुरू होता है (Starts With)
+                 if employee_name.startswith(search_term_lower):
+                     if doc_data.get('HRMS ID') not in [r.get('HRMS ID') for r in results]:
+                         results.append(doc_data)
+                         
+                 if len(results) >= 20: # केवल पहले 20 परिणाम दिखाएँ
+                     break
+                     
         except Exception as e:
-            st.warning(f"Error during employee name search: {e}")
+            st.warning(f"Error during employee search: {e}")
             
     if not results:
         return pd.DataFrame()
@@ -324,8 +329,7 @@ def get_employee_details_by_hrms_id(hrms_id):
             'unit': str(record.get('Unit', 'NA'))
         }
     except Exception as e:
-        # पिछले सेशन में आई त्रुटि को रोकने के लिए मैसेज को सामान्य किया गया
-        st.error(f"Error fetching employee {hrms_id} by ID: Check employee collection structure.")
+        st.error(f"Error fetching employee {hrms_id} by ID. Details: {e}")
         return None
 
 # ----------------------------------------------------------------------
@@ -678,6 +682,8 @@ def authenticate_user():
                                         "PF No.": employee_details_full['pf_number'],
                                         "Unit": employee_details_full['unit']
                                      })
+                                else:
+                                    st.warning(f"Error: HRMS ID {selected_hrms_id} के लिए पूर्ण विवरण नहीं मिला।")
                         else:
                             st.warning("कोई कर्मचारी विवरण नहीं मिला।")
                     elif len(search_term) > 0:
