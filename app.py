@@ -238,9 +238,13 @@ def get_all_quarters():
 
 @st.cache_data(ttl=5)
 def get_quarter_history_df():
-    """Firestore से सभी क्वार्टर इतिहास फ़ेच करता है।"""
-    if db is None: return pd.DataFrame()
+    """Firestore से सभी क्वार्टर इतिहास फ़ेच करता है (Robust version)।"""
+    if db is None: 
+        return pd.DataFrame(columns=['quarter_number', 'station', 'hrms_id', 'is_current'])
     
+    # यह वह कॉलम सेट है जिसकी आवश्यकता रिपोर्टिंग और फिल्टरिंग (is_current) को है
+    required_cols = ['quarter_number', 'station', 'hrms_id', 'is_current', 'employee_name', 'allotment_date', 'vacation_date', 'pf_number', 'designation', 'unit']
+
     try:
         docs = db.collection(QUARTER_HISTORY_COLLECTION).stream()
         data = []
@@ -249,22 +253,32 @@ def get_quarter_history_df():
              record['id'] = doc.id
              data.append(record)
              
+        # यदि Firestore खाली है, तो आवश्यक कॉलम के साथ एक खाली DF लौटाएँ
+        if not data:
+             return pd.DataFrame(columns=required_cols)
+             
         df = pd.DataFrame(data)
         
-        # DATE फ़ील्ड को स्ट्रिंग में बदलें (रिपोर्टिंग के लिए)
+        # सुनिश्चित करें कि 'is_current' boolean फ़ील्ड मौजूद है
+        if 'is_current' not in df.columns:
+             df['is_current'] = False
+        
+        # ... (बाकी डेट और कॉलम क्लीनिंग लॉजिक)
         if 'allotment_date' in df.columns:
              df['allotment_date'] = df['allotment_date'].apply(lambda x: x.strftime('%Y-%m-%d') if isinstance(x, (date, datetime.date)) else str(x))
         if 'vacation_date' in df.columns:
              df['vacation_date'] = df['vacation_date'].apply(lambda x: x.strftime('%Y-%m-%d') if isinstance(x, (date, datetime.date)) else str(x))
              
-        if df.empty: return df
+        # अंतिम जाँच: सुनिश्चित करें कि सभी आवश्यक कॉलम मौजूद हैं
+        for col in required_cols:
+             if col not in df.columns:
+                 df[col] = 'N/A'
              
         return df.sort_values(by=['station', 'quarter_number', 'allotment_date'], ascending=[True, True, False])
         
     except Exception as e:
         st.error(f"Error fetching history from Firestore: {e}")
-        return pd.DataFrame()
-
+        return pd.DataFrame(columns=required_cols)
 
 # ----------------------------------------------------------------------
 # 3. FIREBASE EMPLOYEE DATA LOOKUP (अपरिवर्तित)
@@ -753,3 +767,4 @@ def authenticate_user():
 # --- UI CODE END ---
 
 authenticate_user()
+
