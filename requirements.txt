@@ -1,6 +1,5 @@
+# --- requirements.txt ---
 streamlit
 pandas
-python-docx
-openpyxl
-psycopg2-binary
-SQLAlchemy
+firebase-admin
+python-docx   # Word file generation (docx) के लिए
