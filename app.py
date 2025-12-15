@@ -420,6 +420,8 @@ def allot_quarter(quarter_num, station, hrms_id, allot_date, employee_details):
     # FIX: Ensure clean strings are used for document IDs
     clean_q_num = clean_data_string(quarter_num)
     clean_station = clean_data_string(station)
+    
+    # hrms_id को साफ़ करके उपयोग करें
     clean_hrms_id = clean_data_string(hrms_id)
     
     q_doc_id = f"{clean_station}_{clean_q_num}"
@@ -429,16 +431,24 @@ def allot_quarter(quarter_num, station, hrms_id, allot_date, employee_details):
         batch = db.batch()
         
         # 1. Check for Duplicate Allotment (Employee already has a quarter)
-        # NOTE: यदि यह जांच विफल हो रही है (जैसा कि RMOTSP error में हुआ), तो डेटाबेस में 
-        # उस HRMS ID के लिए is_current: True सेट किया गया कोई रिकॉर्ड दूषित है।
-        docs_dup = db.collection(QUARTER_HISTORY_COLLECTION)\
-                     .where('hrms_id', '==', clean_hrms_id)\
-                     .where('is_current', '==', True).limit(1).get()
+        # FIX: हम केवल is_current: True पर फ़िल्टर कर रहे हैं और फिर client-side पर 
+        # HRMS ID से फ़िल्टर करके यह सुनिश्चित कर रहे हैं कि हम सही ID की जाँच कर रहे हैं।
+        
+        docs_current_occupants = db.collection(QUARTER_HISTORY_COLLECTION)\
+                             .where('is_current', '==', True).get()
+        
+        # client-side पर HRMS ID द्वारा फ़िल्टर करें
+        docs_dup = [
+            doc for doc in docs_current_occupants 
+            if clean_data_string(doc.to_dict().get('hrms_id')) == clean_hrms_id
+        ]
+        
         if docs_dup:
-            # FIX: डुप्लीकेट रिकॉर्ड से सही क्वार्टर की जानकारी खींचना
+            # अब docs_dup में केवल वही रिकॉर्ड होगा जो वर्तमान कर्मचारी को ऑक्यूपाई दिखाता है
             dup_q_num = docs_dup[0].to_dict().get('quarter_number', 'N/A')
             dup_station = docs_dup[0].to_dict().get('station', 'N/A')
             return False, f"Error: Employee ({hrms_id}) already occupies quarter {dup_q_num} at {dup_station}. Please ensure the previous quarter has been vacated in the system (is_current: False)."
+
 
         # 2. Check quarter status
         q_doc = q_doc_ref.get()
@@ -908,3 +918,4 @@ def authenticate_user():
 # --- UI CODE END ---
 
 authenticate_user()
+
