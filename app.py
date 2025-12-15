@@ -283,7 +283,7 @@ def search_employee_details_from_firebase(search_term):
     # 2. नाम से खोज: (Indicated fix: Use client-side filtering to bypass index errors)
     if not results and len(search_term) >= 3:
         try:
-             # FIX: Firestore इंडेक्स की आवश्यकता से बचने के लिए सभी रिकॉर्ड फ़ेच करें
+             # FIX: Firestore इंडेक्स की आवश्यकता से बचने के लिए, सभी रिकॉर्ड फ़ेच करें
              docs_all = db.collection(EMPLOYEE_COLLECTION).stream() 
              
              search_term_lower = search_term.lower()
@@ -363,13 +363,16 @@ def generate_word_file(template_name, data):
     current_date_str_letter = current_date.strftime('%d/%m/%Y') 
     
     template_path = f'{template_name}.docx'
+    
+    # FIX 2: यदि टेम्पलेट फ़ाइल मौजूद नहीं है तो एक स्पष्ट त्रुटि लौटाएँ
     if not os.path.exists(template_path):
-        st.error(f"Template file not found: {template_path}. Ensure templates are present.")
+        st.error(f"Template file not found: {template_path}. Ensure templates are present in the app's root directory.")
         return None
 
     try:
         document = Document(template_path)
         
+        # हिंदी नामों के लिए fallback सहित सभी प्रतिस्थापन
         replacements = {
             '{{DATE}}': current_date_str_letter,
             '{{QUARTER_NUMBER}}': data.get('quarter_number', 'NA'),
@@ -377,15 +380,17 @@ def generate_word_file(template_name, data):
             '{{EMPLOYEE_NAME}}': data.get('employee_name_hindi', data.get('employee_name_english', 'NA')), 
             '{{DESIGNATION}}': data.get('designation_hindi', data.get('designation_english', 'NA')), 
             '{{HRMS_ID}}': data.get('hrms_id', 'NA'),
-            '{{PF_Number}}': data.get('pf_number', 'NA'),
+            '{{PF_NUMBER}}': data.get('pf_number', 'NA'),
             '{{UNIT}}': data.get('unit', 'NA'),
         }
 
+        # पैराग्राफ में प्रतिस्थापन
         for paragraph in document.paragraphs:
             for key, value in replacements.items():
                 if key in paragraph.text:
                     paragraph.text = paragraph.text.replace(key, str(value))
         
+        # टेबल्स में प्रतिस्थापन
         for table in document.tables:
             for row in table.rows:
                 for cell in row.cells:
@@ -412,18 +417,26 @@ def allot_quarter(quarter_num, station, hrms_id, allot_date, employee_details):
     """क्वार्टर को अलॉट करता है और Firestore में मास्टर और हिस्ट्री अपडेट करता है।"""
     if db is None: return False, "Database connection failed."
     
-    q_doc_id = f"{station}_{quarter_num}"
+    # FIX: Ensure clean strings are used for document IDs
+    clean_q_num = clean_data_string(quarter_num)
+    clean_station = clean_data_string(station)
+    clean_hrms_id = clean_data_string(hrms_id)
+    
+    q_doc_id = f"{clean_station}_{clean_q_num}"
     q_doc_ref = db.collection(QUARTER_MASTER_COLLECTION).document(q_doc_id)
     
     try:
         batch = db.batch()
         
-        # 1. Check for Duplicate Allotment
+        # 1. Check for Duplicate Allotment (Employee already has a quarter)
         docs_dup = db.collection(QUARTER_HISTORY_COLLECTION)\
-                     .where('hrms_id', '==', hrms_id)\
+                     .where('hrms_id', '==', clean_hrms_id)\
                      .where('is_current', '==', True).limit(1).get()
         if docs_dup:
-            return False, f"Error: Employee ({hrms_id}) already occupies quarter {docs_dup[0].to_dict().get('quarter_number', 'N/A')}."
+            # FIX: If another quarter is found, use the correct quarter number in the error message
+            dup_q_num = docs_dup[0].to_dict().get('quarter_number', 'N/A')
+            dup_station = docs_dup[0].to_dict().get('station', 'N/A')
+            return False, f"Error: Employee ({hrms_id}) already occupies quarter {dup_q_num} at {dup_station}."
 
         # 2. Check quarter status
         q_doc = q_doc_ref.get()
@@ -437,12 +450,11 @@ def allot_quarter(quarter_num, station, hrms_id, allot_date, employee_details):
         # A. Master Register Update (Set status to Occupied)
         batch.update(q_doc_ref, {
             'current_status': 'Occupied', 
-            'last_occupant_id': hrms_id,
+            'last_occupant_id': clean_hrms_id,
             'updated_at': firestore.SERVER_TIMESTAMP
         })
 
         # B. History Log Insert
-        # FIX: Ensure allot_date is datetime.datetime object for Firebase
         if isinstance(allot_date, datetime.date) and not isinstance(allot_date, datetime.datetime):
              allot_date_obj = datetime.datetime.combine(allot_date, datetime.time())
         else:
@@ -469,6 +481,10 @@ def allot_quarter(quarter_num, station, hrms_id, allot_date, employee_details):
         # C. Generate Word Allotment Letter
         file_stream = generate_word_file("Allotment_Template", employee_details | {"quarter_number": quarter_num, "station": station})
         
+        # FIX 2: अगर लेटर जेनरेट नहीं होता है, तो स्पष्ट त्रुटि संदेश दें
+        if file_stream is None:
+            return False, f"Allotment successful, but **Error generating Allotment Letter** for {quarter_num} at {station}. Check if the 'Allotment_Template.docx' file exists."
+
         return True, file_stream
 
     except Exception as e:
@@ -480,13 +496,18 @@ def vacate_quarter(quarter_num, station, vacate_date):
     """क्वार्टर को खाली करता है और Firestore में मास्टर और हिस्ट्री अपडेट करता है।"""
     if db is None: return False, "Database connection failed."
 
-    q_doc_id = f"{station}_{quarter_num}"
+    # FIX: Ensure clean strings are used for document IDs
+    clean_q_num = clean_data_string(quarter_num)
+    clean_station = clean_data_string(station)
+
+    q_doc_id = f"{clean_station}_{clean_q_num}"
     q_doc_ref = db.collection(QUARTER_MASTER_COLLECTION).document(q_doc_id)
 
     try:
         batch = db.batch()
         
         # A. Get current occupant history record
+        # Note: 'station' और 'quarter_number' के साथ 'is_current' = True पर फ़िल्टर करने के लिए Firestore में Compound Index की आवश्यकता हो सकती है।
         docs_history = db.collection(QUARTER_HISTORY_COLLECTION)\
                          .where('quarter_number', '==', quarter_num)\
                          .where('station', '==', station)\
@@ -502,11 +523,9 @@ def vacate_quarter(quarter_num, station, vacate_date):
         # B. Look up details for the letter
         employee_details_full = get_employee_details_by_hrms_id(hrms_id)
         if employee_details_full is None:
-            # यदि एम्प्लॉई लुकअप विफल होता है, तो सीधे हिस्ट्री डेटा का उपयोग करें
             employee_details_full = history_data 
             employee_details_full['employee_name_english'] = history_data.get('employee_name', 'NA')
             employee_details_full['designation_english'] = history_data.get('designation', 'NA')
-            # अन्य आवश्यक कुंजियों को भरना सुनिश्चित करें
             employee_details_full['hrms_id'] = history_data.get('hrms_id', 'NA')
             employee_details_full['pf_number'] = history_data.get('pf_number', 'NA')
             employee_details_full['unit'] = history_data.get('unit', 'NA')
@@ -535,9 +554,13 @@ def vacate_quarter(quarter_num, station, vacate_date):
         st.cache_data.clear()
         
         # E. Generate Word Vacation Memo
-        # combine dicts for template data
         template_data = employee_details_full | {"quarter_number": quarter_num, "station": station}
         file_stream = generate_word_file("Vacation_Template", template_data)
+        
+        # FIX 2: अगर लेटर जेनरेट नहीं होता है, तो स्पष्ट त्रुटि संदेश दें
+        if file_stream is None:
+            return False, f"Vacation successful, but **Error generating Vacation Memo** for {quarter_num} at {station}. Check if the 'Vacation_Template.docx' file exists."
+
 
         return True, file_stream
 
@@ -555,7 +578,8 @@ def generate_current_status_report():
     
     if df_master.empty: return pd.DataFrame()
     
-    df_current_occupants = df_history[df_history['is_current'] == True].rename(columns={
+    # FIX: .copy() का उपयोग करके SettingWithCopyWarning से बचें
+    df_current_occupants = df_history[df_history['is_current'] == True].copy().rename(columns={
         'employee_name': 'current_occupant',
         'hrms_id': 'occupant_hrms_id',
         'pf_number': 'pf_number',
@@ -585,11 +609,14 @@ def generate_full_history_report():
     df_history = get_quarter_history_df()
     if df_history.empty: return pd.DataFrame()
     
-    df_history['vacation_date'] = df_history.apply(
+    # FIX: .copy() का उपयोग करके SettingWithCopyWarning से बचें
+    df_history_copy = df_history.copy()
+    
+    df_history_copy['vacation_date'] = df_history_copy.apply(
         lambda row: 'CURRENTLY OCCUPIED' if row['is_current'] else row['vacation_date'], axis=1
     )
     
-    df_history['record_type'] = df_history['is_current'].apply(
+    df_history_copy['record_type'] = df_history_copy['is_current'].apply(
         lambda x: 'Current Occupant' if x else 'History Record'
     )
     
@@ -598,7 +625,7 @@ def generate_full_history_report():
         'designation', 'unit', 'allotment_date', 'vacation_date', 'record_type'
     ]
     
-    return df_history[[col for col in display_cols if col in df_history.columns]].fillna('N/A')
+    return df_history_copy[[col for col in display_cols if col in df_history_copy.columns]].fillna('N/A')
 
 # ----------------------------------------------------------------------
 # 7. AUTHENTICATION & UI
@@ -612,7 +639,6 @@ def authenticate_user():
     if 'authenticated' not in st.session_state:
         st.session_state.authenticated = False
     
-    # Session state initialization for downloads (FIX for StreamlitAPIException)
     if 'allot_download_data' not in st.session_state:
         st.session_state.allot_download_data = None
     if 'vacate_download_data' not in st.session_state:
@@ -668,14 +694,17 @@ def authenticate_user():
             # FIX: .copy() का उपयोग करके SettingWithCopyWarning से बचें
             vacant_quarters = quarters_df[quarters_df['current_status'] == 'Vacant'].copy() 
             
-            if vacant_quarters.empty:
-                st.warning("अलॉट करने के लिए कोई खाली क्वार्टर उपलब्ध नहीं है।")
-            
             # डाउनलोड बटन के लिए स्टेट क्लियर करें
             st.session_state.allot_download_data = None 
 
+            if vacant_quarters.empty:
+                st.warning("अलॉट करने के लिए कोई खाली क्वार्टर उपलब्ध नहीं है।")
+            
             if not vacant_quarters.empty:
+                # FIX 1: रोबस्ट सेलेक्शन के लिए इंडेक्स को रीसेट करें
+                vacant_quarters = vacant_quarters.reset_index(drop=True).copy()
                 vacant_quarters['Display'] = vacant_quarters['quarter_number'] + ' (' + vacant_quarters['station'] + ')'
+                display_list = vacant_quarters['Display'].tolist()
                 
                 with st.form("allotment_form"):
                     
@@ -697,7 +726,7 @@ def authenticate_user():
                                 selected_hrms_id = selected_display.split(' - ')[0].strip()
                                 st.info(f"चयनित कर्मचारी HRMS ID: **{selected_hrms_id}**")
                                 
-                                # Fetch full details for allotment (यह अब इंडेक्स के बिना काम करना चाहिए)
+                                # Fetch full details for allotment
                                 employee_details_full = get_employee_details_by_hrms_id(selected_hrms_id)
                                 
                                 if employee_details_full:
@@ -717,7 +746,12 @@ def authenticate_user():
 
                     # 2. Quarter Selection and Date
                     st.subheader("2. क्वार्टर चुनें और तिथि दर्ज करें")
-                    selected_quarter_display = st.selectbox("खाली क्वार्टर चुनें", vacant_quarters['Display'].tolist(), key='allot_q_select')
+                    
+                    # FIX 1: Display list index based selectbox
+                    selected_index = st.selectbox("खाली क्वार्टर चुनें", 
+                                                range(len(display_list)), 
+                                                format_func=lambda i: display_list[i], 
+                                                key='allot_q_select_index')
                     
                     allot_date = st.date_input("अलॉटमेंट तिथि", datetime.date.today(), key='allot_date') 
                     
@@ -726,27 +760,31 @@ def authenticate_user():
                     submitted = st.form_submit_button("🔑 क्वार्टर अलॉट करें और लेटर जेनरेट करें")
 
                     if submitted:
-                        if selected_hrms_id and employee_details_full and selected_quarter_display:
+                        if selected_hrms_id and employee_details_full and selected_index is not None:
                             
-                            selected_q_num = selected_quarter_display.split(' (')[0].strip()
-                            selected_station = selected_quarter_display.split('(')[-1].strip(')')
+                            # FIX 1: इंडेक्स का उपयोग करके quarter_number और station को सीधे DataFrame से प्राप्त करें
+                            selected_row = vacant_quarters.iloc[selected_index]
+                            selected_q_num = selected_row['quarter_number']
+                            selected_station = selected_row['station']
 
-                            with st.spinner("अलॉटमेंट संसाधित किया जा रहा है..."):
+                            with st.spinner(f"क्वार्टर {selected_q_num} अलॉटमेंट संसाधित किया जा रहा है..."):
                                 success, result = allot_quarter(selected_q_num, selected_station, selected_hrms_id, allot_date, employee_details_full)
                             
                             if success:
                                 st.success("🎉 अलॉटमेंट सफलतापूर्वक पूरा हुआ!")
+                                # result अब file_stream है, जो None नहीं हो सकता (क्योंकि allot_quarter में चेक हो गया है)
                                 st.session_state.allot_download_data = {
                                     "stream": result,
                                     "filename": f"Allotment_Letter_{selected_q_num}_{selected_hrms_id}.docx"
                                 }
                                 st.rerun() 
                             else:
-                                st.error(result)
+                                # result में अब स्पष्ट त्रुटि संदेश है
+                                st.error(result) 
                         else:
                             st.error("कृपया एक खाली क्वार्टर चुनें और सुनिश्चित करें कि कर्मचारी विवरण सफलतापूर्वक प्राप्त हुआ है।")
 
-            # FIX: डाउनलोड बटन फॉर्म के बाहर!
+            # डाउनलोड बटन फॉर्म के बाहर!
             if st.session_state.allot_download_data:
                 dl_data = st.session_state.allot_download_data
                 st.markdown("---")
@@ -777,12 +815,23 @@ def authenticate_user():
             st.session_state.vacate_download_data = None
                 
             if not occupied_quarters.empty:
+                # FIX 1: रोबस्ट सेलेक्शन के लिए इंडेक्स को रीसेट करें
+                occupied_quarters = occupied_quarters.reset_index(drop=True).copy()
                 occupied_quarters['Display'] = occupied_quarters['quarter_number'] + ' (' + occupied_quarters['station'] + ')'
-                selected_occupied_display = st.selectbox("ऑक्यूपाइड क्वार्टर चुनें", occupied_quarters['Display'].tolist(), key='vacate_q_select')
+                display_list_vacate = occupied_quarters['Display'].tolist()
+                
+                # FIX 1: Display list index based selectbox
+                selected_index_vacate = st.selectbox("ऑक्यूपाइड क्वार्टर चुनें", 
+                                                range(len(display_list_vacate)), 
+                                                format_func=lambda i: display_list_vacate[i], 
+                                                key='vacate_q_select_index')
 
-                if selected_occupied_display:
-                    selected_q_num = selected_occupied_display.split(' (')[0].strip()
-                    selected_station = selected_occupied_display.split('(')[-1].strip(')')
+
+                if selected_index_vacate is not None:
+                    # FIX 1: इंडेक्स का उपयोग करके quarter_number और station को सीधे DataFrame से प्राप्त करें
+                    selected_row_vacate = occupied_quarters.iloc[selected_index_vacate]
+                    selected_q_num = selected_row_vacate['quarter_number']
+                    selected_station = selected_row_vacate['station']
                     
                     st.info(f"चयनित: **{selected_q_num}** (स्टेशन: **{selected_station}**)")
 
@@ -806,7 +855,7 @@ def authenticate_user():
                             else:
                                 st.error(result)
 
-            # FIX: डाउनलोड बटन फॉर्म के बाहर!
+            # डाउनलोड बटन फॉर्म के बाहर!
             if st.session_state.vacate_download_data:
                  dl_data = st.session_state.vacate_download_data
                  st.markdown("---")
