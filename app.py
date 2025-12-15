@@ -17,13 +17,13 @@ import uuid
 
 # NOTE: सुनिश्चित करें कि ये फ़ाइलें /data फ़ोल्डर में मौजूद हैं।
 INVENTORY_CSV_PATH = "data/Quarter_Register.csv" 
-# FIX 1: कलेक्शन नाम को वापस "employees" पर सेट किया गया
+# संग्रह का नाम आपके बताए अनुसार "employees" सेट किया गया है।
 EMPLOYEE_COLLECTION = "employees"          
 QUARTER_MASTER_COLLECTION = "master_quarters"
 QUARTER_HISTORY_COLLECTION = "quarter_history" 
 
 # --- SECURITY CONFIGURATION ---
-# पासवर्ड secrets.toml से लोड करें, डिफ़ॉल्ट 'default_password'
+# पासवर्ड secrets.toml से लोड करें
 CORRECT_PASSWORD = st.secrets.get("CORRECT_PASSWORD", "default_password")
 # ------------------------------
 
@@ -202,7 +202,7 @@ def get_all_quarters():
 
 @st.cache_data(ttl=5)
 def get_quarter_history_df():
-    """Firestore से सभी क्वार्टर इतिहास फ़ेच करता है (Robust version)।"""
+    """Firestore से सभी क्वार्टर इतिहास फ़ेच करता है (Robust version, NaT फिक्स के साथ)।"""
     if db is None: 
         return pd.DataFrame(columns=['quarter_number', 'station', 'hrms_id', 'is_current'])
     
@@ -227,14 +227,27 @@ def get_quarter_history_df():
         # DATE फ़ील्ड को स्ट्रिंग में बदलें (रिपोर्टिंग के लिए)
         date_format = '%Y-%m-%d'
         
+        # FIX: NaT/None हैंडलिंग के लिए सुरक्षित फ़ंक्शन
+        def safe_date_to_str(x):
+            # None, np.nan, या pd.NaT के लिए जाँच करें
+            if pd.isna(x) or x is None:
+                return 'N/A'
+            try:
+                # यदि यह datetime object है (Firestore Timestamps)
+                if isinstance(x, datetime.datetime):
+                    return x.strftime(date_format)
+                # यदि यह date object है
+                elif hasattr(x, 'date'):
+                    return x.date().strftime(date_format)
+                return str(x)
+            except Exception:
+                return 'N/A' # यदि कोई और पार्सिंग त्रुटि हो
+        
         if 'allotment_date' in df.columns:
-             df['allotment_date'] = df['allotment_date'].apply(
-                 lambda x: x.strftime(date_format) if isinstance(x, datetime.datetime) else (x.date().strftime(date_format) if hasattr(x, 'date') else str(x))
-             )
+             df['allotment_date'] = df['allotment_date'].apply(safe_date_to_str)
+             
         if 'vacation_date' in df.columns:
-             df['vacation_date'] = df['vacation_date'].apply(
-                 lambda x: x.strftime(date_format) if isinstance(x, datetime.datetime) else (x.date().strftime(date_format) if hasattr(x, 'date') else str(x))
-             )
+             df['vacation_date'] = df['vacation_date'].apply(safe_date_to_str)
              
         for col in required_cols:
              if col not in df.columns:
@@ -257,21 +270,20 @@ def search_employee_details_from_firebase(search_term):
     search_term = str(search_term).strip()
     results = []
 
-    # 1. HRMS ID से exact मैच की जाँच करें
+    # 1. HRMS ID से exact मैच की जाँच करें (अभी भी इंडेक्स की आवश्यकता है)
     try:
-        # Note: 'HRMS ID' field name must match exactly in Firestore
         docs_id = db.collection(EMPLOYEE_COLLECTION)\
                     .where('HRMS ID', '==', search_term)\
                     .limit(1).get()
         if docs_id:
             results.append(docs_id[0].to_dict())
     except Exception:
-        pass
+        pass # अगर HRMS ID क्वेरी इंडेक्स के कारण विफल हो जाती है, तो नाम खोज पर आगे बढ़ें
         
     # 2. नाम से खोज: (Indicated fix: Use client-side filtering to bypass index errors)
     if not results and len(search_term) >= 3:
         try:
-             # FIX 2: Firestore इंडेक्स की आवश्यकता से बचने के लिए सभी रिकॉर्ड फ़ेच करें
+             # FIX: Firestore इंडेक्स की आवश्यकता से बचने के लिए सभी रिकॉर्ड फ़ेच करें
              docs_all = db.collection(EMPLOYEE_COLLECTION).stream() 
              
              search_term_lower = search_term.lower()
@@ -290,7 +302,7 @@ def search_employee_details_from_firebase(search_term):
                      break
                      
         except Exception as e:
-            st.warning(f"Error during employee search: {e}")
+            st.warning(f"Error during employee name search: {e}")
             
     if not results:
         return pd.DataFrame()
@@ -305,8 +317,6 @@ def search_employee_details_from_firebase(search_term):
     return df[['HRMS ID', 'Employee Name', 'Designation', 'Unit', 'PF Number']]
 
 
-# app.py में Line 434 के आसपास
-
 @st.cache_data(ttl=3600)
 def get_employee_details_by_hrms_id(hrms_id):
     """केवल HRMS ID से एक ही कर्मचारी का विवरण प्राप्त करता है (FIXED for Index Error)."""
@@ -314,30 +324,19 @@ def get_employee_details_by_hrms_id(hrms_id):
     hrms_id_str = clean_data_string(hrms_id)
     
     try:
-        # FIX: इंडेक्सिंग त्रुटि से बचने के लिए, हम एक सरल ID-आधारित दस्तावेज़ का प्रयास करते हैं 
-        # या यदि यह विफल हो जाता है, तो हम सभी रिकॉर्ड फ़ेच करके Python में फ़िल्टर करते हैं।
-        
-        # 1. यदि HRMS ID दस्तावेज़ ID के रूप में उपयोग किया जाता है तो सीधे प्रयास करें (ज्यादातर मामलों में विफल होगा)
-        # docs = db.collection(EMPLOYEE_COLLECTION).document(hrms_id_str).get()
-        # if docs.exists: return docs.to_dict() # (यह कोड हटा दिया गया, क्योंकि यह आमतौर पर उपयोग नहीं होता)
-
-        # 2. अब, HRMS ID फ़ील्ड द्वारा खोज करें (जो विफल हो रहा है, इसलिए इसे बदलें)
-        
-        # FIX: इंडेक्सिंग त्रुटि से बचने के लिए, हम अब केवल 'HRMS ID' फ़ील्ड पर 
-        # निर्भर होने के बजाय, एक साधारण 'stream()' का उपयोग करके डेटा को खींचते हैं 
-        # और Python में फ़िल्टर करते हैं।
+        # FIX: इंडेक्सिंग त्रुटि से बचने के लिए, हम stream() का उपयोग करके डेटा खींचते हैं और Python में सटीक HRMS ID मैच के लिए फ़िल्टर करते हैं।
         
         docs = db.collection(EMPLOYEE_COLLECTION).stream()
         record = None
 
         for doc in docs:
             doc_data = doc.to_dict()
+            # clean_data_string का उपयोग करके यह सुनिश्चित करें कि तुलना केस/स्पेस संवेदनशील नहीं है
             if clean_data_string(doc_data.get('HRMS ID')) == hrms_id_str:
                 record = doc_data
                 break
         
         if record is None:
-            st.warning(f"Employee {hrms_id} not found by exact match in stream.")
             return None
             
         # सुनिश्चित करें कि सभी आवश्यक कुंजियाँ मौजूद हैं
@@ -351,8 +350,7 @@ def get_employee_details_by_hrms_id(hrms_id):
             'unit': str(record.get('Unit', 'NA'))
         }
     except Exception as e:
-        # यह त्रुटि अब नहीं आनी चाहिए, लेकिन अगर आती है तो भी इसे संभाल लें
-        st.error(f"FATAL Error fetching employee {hrms_id} by ID (post-fix). Details: {e}")
+        st.error(f"Error fetching employee {hrms_id} by ID. Details: {e}")
         return None
 
 # ----------------------------------------------------------------------
@@ -508,6 +506,10 @@ def vacate_quarter(quarter_num, station, vacate_date):
             employee_details_full = history_data 
             employee_details_full['employee_name_english'] = history_data.get('employee_name', 'NA')
             employee_details_full['designation_english'] = history_data.get('designation', 'NA')
+            # अन्य आवश्यक कुंजियों को भरना सुनिश्चित करें
+            employee_details_full['hrms_id'] = history_data.get('hrms_id', 'NA')
+            employee_details_full['pf_number'] = history_data.get('pf_number', 'NA')
+            employee_details_full['unit'] = history_data.get('unit', 'NA')
             st.warning("कर्मचारी विवरण (Firebase) नहीं मिला। मेमो में इतिहास डेटा का उपयोग किया जाएगा।")
 
         # FIX: Ensure vacate_date is datetime.datetime object for Firebase
@@ -663,7 +665,8 @@ def authenticate_user():
             st.header("🔑 नया क्वार्टर अलॉट करें")
             
             quarters_df = get_all_quarters()
-            vacant_quarters = quarters_df[quarters_df['current_status'] == 'Vacant']
+            # FIX: .copy() का उपयोग करके SettingWithCopyWarning से बचें
+            vacant_quarters = quarters_df[quarters_df['current_status'] == 'Vacant'].copy() 
             
             if vacant_quarters.empty:
                 st.warning("अलॉट करने के लिए कोई खाली क्वार्टर उपलब्ध नहीं है।")
@@ -694,7 +697,7 @@ def authenticate_user():
                                 selected_hrms_id = selected_display.split(' - ')[0].strip()
                                 st.info(f"चयनित कर्मचारी HRMS ID: **{selected_hrms_id}**")
                                 
-                                # Fetch full details for allotment
+                                # Fetch full details for allotment (यह अब इंडेक्स के बिना काम करना चाहिए)
                                 employee_details_full = get_employee_details_by_hrms_id(selected_hrms_id)
                                 
                                 if employee_details_full:
@@ -706,7 +709,7 @@ def authenticate_user():
                                         "Unit": employee_details_full['unit']
                                      })
                                 else:
-                                    st.warning(f"Error: HRMS ID {selected_hrms_id} के लिए पूर्ण विवरण नहीं मिला।")
+                                    st.error(f"Error: HRMS ID {selected_hrms_id} के लिए पूर्ण विवरण नहीं मिला। (डेटाबेस में HRMS ID/नाम की वर्तनी जाँचें)")
                         else:
                             st.warning("कोई कर्मचारी विवरण नहीं मिला।")
                     elif len(search_term) > 0:
@@ -733,12 +736,11 @@ def authenticate_user():
                             
                             if success:
                                 st.success("🎉 अलॉटमेंट सफलतापूर्वक पूरा हुआ!")
-                                # FIX: परिणाम को सेशन स्टेट में स्टोर करें, डाउनलोड बटन फॉर्म के बाहर होगा।
                                 st.session_state.allot_download_data = {
                                     "stream": result,
                                     "filename": f"Allotment_Letter_{selected_q_num}_{selected_hrms_id}.docx"
                                 }
-                                st.rerun() # Rerender to show download button
+                                st.rerun() 
                             else:
                                 st.error(result)
                         else:
@@ -755,7 +757,6 @@ def authenticate_user():
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     key='download_allotment_final'
                 )
-                # डाउनलोड दिखाने के बाद डेटा साफ़ करें
                 st.session_state.allot_download_data = None 
 
 
@@ -766,7 +767,8 @@ def authenticate_user():
             st.header("🔓 क्वार्टर खाली करें")
             
             quarters_df = get_all_quarters()
-            occupied_quarters = quarters_df[quarters_df['current_status'] == 'Occupied']
+            # FIX: .copy() का उपयोग करके SettingWithCopyWarning से बचें
+            occupied_quarters = quarters_df[quarters_df['current_status'] == 'Occupied'].copy()
             
             if occupied_quarters.empty:
                 st.warning("खाली करने के लिए कोई ऑक्यूपाइड क्वार्टर नहीं है।")
@@ -796,12 +798,11 @@ def authenticate_user():
                             
                             if success:
                                 st.success("🎉 वेकेशन सफलतापूर्वक पूरा हुआ!")
-                                # FIX: परिणाम को सेशन स्टेट में स्टोर करें, डाउनलोड बटन फॉर्म के बाहर होगा।
                                 st.session_state.vacate_download_data = {
                                     "stream": result,
                                     "filename": f"Vacation_Memo_{selected_q_num}_{selected_station}.docx"
                                 }
-                                st.rerun() # Rerender to show download button
+                                st.rerun() 
                             else:
                                 st.error(result)
 
@@ -816,7 +817,6 @@ def authenticate_user():
                      mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                      key='download_vacation_final'
                  )
-                 # डाउनलोड दिखाने के बाद डेटा साफ़ करें
                  st.session_state.vacate_download_data = None
 
 
@@ -858,4 +858,3 @@ def authenticate_user():
 # --- UI CODE END ---
 
 authenticate_user()
-
