@@ -1,5 +1,5 @@
-# --- requirements.txt ---
 streamlit
 pandas
 firebase-admin
-python-docx   # Word file generation (docx) के लिए
+python-docx
+python-dateutil
