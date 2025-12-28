@@ -4,9 +4,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import os
 import io
-import base64
 from docx import Document
-from docx.shared import Inches
 from datetime import date, datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
@@ -23,97 +21,91 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-# --- 2. DATA FETCH HELPERS ---
+# --- 2. DATA HELPERS ---
 def get_cloud_data(collection):
     docs = db.collection(collection).stream()
     data = [doc.to_dict() for doc in docs]
     return pd.DataFrame(data) if data else pd.DataFrame()
 
-# --- 3. HELPER FUNCTIONS ---
-def format_date_safe(date_val):
-    if pd.isna(date_val): return "N/A"
-    if isinstance(date_val, datetime): return date_val.strftime("%d-%m-%Y")
-    return str(date_val)
-
-def generate_word_file(template_path, context, letter_type):
+# --- 3. DOCUMENT ENGINE ---
+def generate_office_letter(template_name, context, letter_type):
+    template_path = f"assets/{template_name}.docx"
     if not os.path.exists(template_path):
-        st.error(f"Template missing: {template_path}")
+        st.error(f"Template not found: {template_path}")
         return None
     
     doc = Document(template_path)
 
-    # --- SPECIAL CASE: Table Insertion for NOCs (As per your old logic) ---
-    if letter_type in ["Exam NOC Letter temp", "DAR NOC temp"] and "EmployeeData" in context:
+    # NOC Table Logic
+    if "NOC" in letter_type and "EmployeeData" in context:
         for paragraph in doc.paragraphs:
-            # Table Logic for Exam NOC
-            if letter_type == "Exam NOC Letter temp" and "[PFNumber]" in paragraph.text:
+            if "[PFNumber]" in paragraph.text:
                 p = paragraph._element
                 p.getparent().remove(p)
                 table = doc.add_table(rows=1, cols=6)
                 table.style = "Table Grid"
                 hdr = table.rows[0].cells
-                headers = ["Sr.", "PF Number", "Name", "Desig", "Exam", "Term"]
+                headers = ["Sr.", "PF Number", "Name", "Desig", "Exam/Purpose", "Term/Details"]
                 for i, h in enumerate(headers): hdr[i].text = h
                 
                 for idx, emp in enumerate(context["EmployeeData"]):
                     row_cells = table.add_row().cells
                     row_cells[0].text = str(idx + 1)
-                    row_cells[1].text = str(emp["PF Number"])
-                    row_cells[2].text = emp["Employee Name"]
-                    row_cells[3].text = emp["Designation"]
-                    row_cells[4].text = emp["Exam Name"]
-                    row_cells[5].text = emp["Term"]
+                    row_cells[1].text = str(emp.get("PF", ""))
+                    row_cells[2].text = emp.get("Name", "")
+                    row_cells[3].text = emp.get("Desig", "")
+                    row_cells[4].text = emp.get("Subject", "")
+                    row_cells[5].text = emp.get("Details", "")
                 break
 
-    # General Placeholder Replacement
-    def replace_tags(text, ctx):
+    def replace_placeholder(text, ctx):
         for k, v in ctx.items():
             text = text.replace(f"[{k}]", str(v)).replace(f"{{{{ {k} }}}}", str(v)).replace(f"{{{{{k}}}}}", str(v))
         return text
 
-    for p in doc.paragraphs: p.text = replace_tags(p.text, context)
+    for p in doc.paragraphs: p.text = replace_placeholder(p.text, context)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                for p in cell.paragraphs: p.text = replace_tags(p.text, context)
+                for p in cell.paragraphs: p.text = replace_placeholder(p.text, context)
 
     bio = io.BytesIO()
     doc.save(bio)
     bio.seek(0)
     return bio
 
-# --- 4. MAIN UI ---
-st.set_page_config(page_title="SSE/PW/SGAM Cloud", layout="wide")
-st.title("🚂 SSE/PW/SGAM - Complete Management System")
+# --- 4. MAIN INTERFACE ---
+st.set_page_config(page_title="Railway Admin Portal", layout="wide")
+st.title("🚂 SSE/PW/SGAM - एकीकृत क्लाउड पोर्टल")
 
-if st.sidebar.text_input("Admin Password", type="password") == st.secrets.get("PASSWORD", "sgam@4321"):
+if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWORD", "sgam@4321"):
     
     emp_df = get_cloud_data('employees')
     q_df = get_cloud_data('master_quarters')
 
     if not emp_df.empty:
-        # Firestore headers with spaces
+        # Space-based Headers from Firestore
         emp_df['Display'] = emp_df['PF No.'].astype(str) + " - " + emp_df['Employee Name in Hindi'].astype(str)
         
-        tab_choice = st.sidebar.radio("Navigation", ["Letters", "Quarter System", "Registers"])
+        menu = st.sidebar.radio("Menu", ["Letter Generation", "Quarter Master", "Digital Registers"])
 
-        # --- TAB: LETTERS ---
-        if tab_choice == "Letters":
-            letter_opt = st.selectbox("Letter Type", [
+        if menu == "Letter Generation":
+            letter_opt = st.selectbox("Select Letter", [
                 "Absent Duty letter temp", "SF-11 temp", "SF-11 Punishment order temp", 
                 "SICK MEMO temp.", "Exam NOC Letter temp", "DAR NOC temp", "pme_memo_temp"
             ])
 
-            # Multi-select for NOCs, Single for others
+            # Selection Logic
             if "NOC" in letter_opt:
                 selected_names = st.multiselect("Select Employees", emp_df['Display'])
-                selected_rows = emp_df[emp_df['Display'].isin(selected_names)]
+                target_rows = emp_df[emp_df['Display'].isin(selected_names)]
             else:
                 selected_name = st.selectbox("Select Employee", emp_df['Display'])
-                selected_rows = emp_df[emp_df['Display'] == selected_name]
+                target_rows = emp_df[emp_df['Display'] == selected_name]
 
-            if not selected_rows.empty:
-                first_row = selected_rows.iloc[0]
+            if not target_rows.empty:
+                first_row = target_rows.iloc[0]
+                # Default Context
                 ctx = {
                     "EmployeeName": first_row.get('Employee Name in Hindi', ''),
                     "Designation": first_row.get('Designation in Hindi', ''),
@@ -121,64 +113,83 @@ if st.sidebar.text_input("Admin Password", type="password") == st.secrets.get("P
                     "Unit": str(first_row.get('UNIT / MUSTER NUMBER', ''))[:2],
                     "UnitNumber": first_row.get('UNIT / MUSTER NUMBER', ''),
                     "LetterDate": date.today().strftime("%d-%m-%Y"),
-                    "Date": date.today().strftime("%d-%m-%Y")
+                    "Date": date.today().strftime("%d-%m-%Y"),
+                    "ShortName": "STF"
                 }
 
-                # Conditional Inputs
-                if "Exam NOC" in letter_opt:
+                # --- DYNAMIC INPUTS ---
+                if "Absent" in letter_opt:
+                    col1, col2 = st.columns(2)
+                    f_date = col1.date_input("Absent From Date")
+                    t_date = col2.date_input("Absent To Date")
+                    d_date = st.date_input("Reporting Duty Date", value=t_date + timedelta(days=1))
+                    ctx.update({
+                        "FromDate": f_date.strftime("%d-%m-%Y"),
+                        "ToDate": t_date.strftime("%d-%m-%Y"),
+                        "DutyDate": d_date.strftime("%d-%m-%Y")
+                    })
+
+                elif "SF-11" in letter_opt:
+                    ctx["Memo"] = st.text_area("विवरण / Charge Details (Memo)", height=150)
+                    if "Punishment" in letter_opt:
+                        ctx["Dandadesh"] = st.text_input("दंड आदेश नंबर", value="SGAM/SF-11/Order/01")
+                        ctx["SF-11Date"] = st.date_input("पुराने SF-11 की तारीख").strftime("%d-%m-%Y")
+                        ctx["LetterNo."] = st.text_input("पुरानी चार्जशीट फाइल नंबर")
+
+                elif "NOC" in letter_opt:
                     emp_data_list = []
-                    for _, r in selected_rows.iterrows():
-                        exam = st.text_input(f"Exam for {r['PF No.']}", key=f"ex_{r['PF No.']}")
-                        term = st.text_input(f"Term for {r['PF No.']}", value="2024-25", key=f"tr_{r['PF No.']}")
-                        emp_data_list.append({"PF Number": r['PF No.'], "Employee Name": r['Employee Name in Hindi'], "Designation": r['Designation in Hindi'], "Exam Name": exam, "Term": term})
+                    for _, r in target_rows.iterrows():
+                        subj = st.text_input(f"Exam/Subject for {r['PF No.']}")
+                        dtl = st.text_input(f"Term/Details for {r['PF No.']}", value="2024-25")
+                        emp_data_list.append({"PF": r['PF No.'], "Name": r['Employee Name in Hindi'], "Desig": r['Designation in Hindi'], "Subject": subj, "Details": dtl})
                     ctx["EmployeeData"] = emp_data_list
 
-                if "pme_memo" in letter_opt:
+                elif "pme" in letter_opt:
                     dob = pd.to_datetime(first_row.get('DOB')).date()
-                    doa = pd.to_datetime(first_row.get('DOA')).date()
-                    age = relativedelta(date.today(), dob).years
-                    ctx.update({"dob": dob.strftime("%d-%m-%Y"), "age": age, "medical_category": first_row.get("Medical category", "A3")})
+                    ctx.update({
+                        "name": first_row.get('Employee Name in English', ''),
+                        "age": relativedelta(date.today(), dob).years,
+                        "father_name": first_row.get("FATHER'S NAME", ''),
+                        "medical_category": first_row.get("Medical category", "A3"),
+                        "dob": dob.strftime("%d-%m-%Y")
+                    })
 
-                if st.button("Generate Letter & Sync"):
-                    res = generate_word_file(f"assets/{letter_opt}.docx", ctx, letter_opt)
-                    if res:
-                        st.download_button("Download", res, file_name=f"{letter_opt}.docx")
+                if st.button("Generate & Sync to Cloud"):
+                    doc_result = generate_office_letter(letter_opt, ctx, letter_opt)
+                    if doc_result:
+                        st.download_button("Download Letter", doc_result, file_name=f"{letter_opt}.docx")
                         
-                        # SF-11 Register Update in Firestore
+                        # Register Update
                         if "SF-11" in letter_opt:
                             db.collection("sf11_register").add({
                                 "PF No.": ctx["PFNumber"],
                                 "Name": ctx["EmployeeName"],
-                                "Letter Type": letter_opt,
-                                "Generated At": datetime.now()
+                                "Memo": ctx.get("Memo", ""),
+                                "Date": datetime.now(),
+                                "Type": letter_opt
                             })
-                            st.success("SF-11 Register Updated on Cloud!")
+                            st.success("Firestore Updated!")
 
-        # --- TAB: QUARTER SYSTEM ---
-        elif tab_choice == "Quarter System":
-            st.subheader("🏠 Quarter Management")
-            vacant_qs = q_df[q_df['STATUS'] == 'Vacant']
-            sel_q = st.selectbox("Quarter No.", vacant_qs['QUARTER NO.'] if not vacant_qs.empty else ["No Vacant"])
-            sel_emp = st.selectbox("Assign To", emp_df['Display'])
-            target = emp_df[emp_df['Display'] == sel_emp].iloc[0]
+        elif menu == "Quarter Master":
+            st.subheader("🏠 Quarter Allotment")
+            v_qs = q_df[q_df['STATUS'] == 'Vacant']
+            sel_q = st.selectbox("Quarter", v_qs['QUARTER NO.'] if not v_qs.empty else ["No Vacancy"])
+            sel_e = st.selectbox("Assign To", emp_df['Display'])
+            e_row = emp_df[emp_df['Display'] == sel_e].iloc[0]
 
-            if st.button("Allot & Update Database"):
-                q_id = f"{target['UNIT / MUSTER NUMBER']}_{sel_q}"
+            if st.button("Allot Quarter"):
+                q_id = f"{e_row['UNIT / MUSTER NUMBER']}_{sel_q}"
                 db.collection("master_quarters").document(q_id).update({
-                    "STATUS": "Occupied",
-                    "PF No.": target['PF No.'],
-                    "OCCUPIED DATE": date.today().strftime("%d-%m-%Y")
+                    "STATUS": "Occupied", "PF No.": e_row['PF No.'], "DATE": date.today().strftime("%d-%m-%Y")
                 })
-                st.success("Quarter Database Updated!")
+                st.success("Quarter Database Sync Complete.")
 
-        # --- TAB: REGISTERS ---
-        elif tab_choice == "Registers":
-            st.subheader("📊 Live Cloud Registers")
-            reg_type = st.selectbox("View Register", ["SF-11 Logs", "Quarter Master"])
-            if reg_type == "SF-11 Logs":
+        elif menu == "Digital Registers":
+            st.subheader("📊 Live Database Views")
+            reg = st.radio("Choose Register", ["SF-11 History", "Quarter Status"], horizontal=True)
+            if reg == "SF-11 History":
                 st.dataframe(get_cloud_data("sf11_register"), use_container_width=True)
             else:
                 st.dataframe(q_df, use_container_width=True)
-
 else:
-    st.info("Sidebar me password enter karein.")
+    st.warning("Side menu mein password enter karein.")
