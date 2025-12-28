@@ -110,8 +110,8 @@ if st.sidebar.text_input("Admin Password", type="password") == st.secrets.get("P
                     "EmployeeName": first.get('Employee Name in Hindi', ''),
                     "Designation": first.get('Designation in Hindi', ''),
                     "PFNumber": first.get('PF No.', ''),
-                    "Unit": str(first.get('UNIT / MUSTER NUMBER', ''))[:2],
-                    "UnitNumber": first.get('UNIT / MUSTER NUMBER', ''),
+                    "Unit": str(first.get('Unit', ''))[:2],
+                    "UnitNumber": first.get('Unit', ''),
                     "LetterDate": date.today().strftime("%d-%m-%Y"),
                     "Date": date.today().strftime("%d-%m-%Y"),
                     "ShortName": "STF"
@@ -213,3 +213,4 @@ if st.sidebar.text_input("Admin Password", type="password") == st.secrets.get("P
 
 else:
     st.warning("कृपया ऐप एक्सेस करने के लिए साइडबार में सही पासवर्ड डालें।")
+
