@@ -4,183 +4,147 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import os
 import io
-import base64
 from docx import Document
-from docx.shared import Inches
 from datetime import date, datetime, timedelta
 from dateutil.relativedelta import relativedelta
-from pathlib import Path
 
 # --- 1. FIREBASE INITIALIZATION ---
 if not firebase_admin._apps:
     try:
-        # st.secrets['firebase_config'] का उपयोग करें
         cred_dict = dict(st.secrets["firebase_config"])
         if isinstance(cred_dict.get('private_key'), str):
             cred_dict['private_key'] = cred_dict['private_key'].replace('\\n', '\n')
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred)
     except Exception as e:
-        st.error(f"Firebase initialization failed: {e}")
+        st.error(f"Firebase Setup Error: {e}")
 
 db = firestore.client()
 
-# --- 2. FIRESTORE HELPERS ---
-def get_employees():
-    docs = db.collection('employees').stream()
-    return pd.DataFrame([doc.to_dict() for doc in docs])
+# --- 2. DATA FETCH HELPERS ---
+def get_cloud_data(collection_name):
+    docs = db.collection(collection_name).stream()
+    data = [doc.to_dict() for doc in docs]
+    return pd.DataFrame(data) if data else pd.DataFrame()
 
-def get_quarters():
-    docs = db.collection('master_quarters').stream()
-    return pd.DataFrame([doc.to_dict() for doc in docs])
-
-def get_sf11_register():
-    docs = db.collection('sf11_register').stream()
-    return pd.DataFrame([doc.to_dict() for doc in docs])
-
-# --- 3. PLACEHOLDER REPLACEMENT ENGINE ---
-def replace_placeholders(doc, context):
-    """पराग्राफ और टेबल दोनों में टैग्स बदलता है"""
-    def multi_replace(text, data):
-        for key, val in data.items():
-            val_str = str(val) if val is not None else ""
-            # Handle both formats: [Key] and {{ Key }}
-            text = text.replace(f"[{key}]", val_str)
-            text = text.replace(f"{{{{ {key} }}}}", val_str)
-            text = text.replace(f"{{{{{key}}}}}", val_str)
-        return text
-
-    for p in doc.paragraphs:
-        p.text = multi_replace(p.text, context)
-    
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs:
-                    p.text = multi_replace(p.text, context)
-
-# --- 4. CORE DOCUMENT GENERATION ---
-def generate_doc(template_path, context, filename):
+# --- 3. DOCUMENT GENERATION ENGINE ---
+def generate_docx(template_name, context):
+    template_path = f"assets/{template_name}.docx"
     if not os.path.exists(template_path):
         st.error(f"Template not found: {template_path}")
         return None
     
     doc = Document(template_path)
     
-    # --- Special Case: Table Insertion for NOCs ---
-    if context.get("LetterType") in ["Exam NOC", "DAR/Vigilance NOC"] and context.get("EmployeeData"):
-        # (यहाँ आपके द्वारा दिया गया DAR/Exam NOC टेबल लॉजिक लागू होगा)
-        # संक्षेप के लिए: यह context["EmployeeData"] का उपयोग करके doc.add_table() करता है
-        pass # UI में विस्तृत लॉजिक लागू किया गया है
+    def replace_all(text, ctx):
+        for k, v in ctx.items():
+            # [Key] और {{ Key }} दोनों को सपोर्ट करता है
+            text = text.replace(f"[{k}]", str(v)).replace(f"{{{{ {k} }}}}", str(v)).replace(f"{{{{{k}}}}}", str(v))
+        return text
 
-    replace_placeholders(doc, context)
+    for p in doc.paragraphs:
+        p.text = replace_all(p.text, context)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    p.text = replace_all(p.text, context)
     
     bio = io.BytesIO()
     doc.save(bio)
     bio.seek(0)
     return bio
 
-# --- 5. UI SETUP ---
-st.set_page_config(page_title="Railway Admin Portal", layout="wide")
-st.title("🚂 SSE/PW/SGAM - एकीकृत क्लाउड प्रबंधन")
+# --- 4. MAIN UI ---
+st.set_page_config(page_title="Railway Admin Cloud", layout="wide")
+st.title("🚂 SSE/PW/SGAM - Cloud Integrated Management")
 
-if st.sidebar.text_input("Password", type="password") == "sgam@4321":
+if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWORD", "sgam@4321"):
     
-    # Data Loading
-    emp_df = get_employees()
-    q_df = get_quarters()
-    
-    menu = st.sidebar.selectbox("Main Menu", ["Office Letters", "Quarter Allotment", "SF-11 Register"])
+    # Firestore से डेटा लोड करना
+    emp_df = get_cloud_data('employees')
+    q_df = get_cloud_data('master_quarters')
 
-    # --- TAB: OFFICE LETTERS ---
-    if menu == "Office Letters":
-        letter_type = st.selectbox("Select Letter", [
-            "Duty Letter (For Absent)", "SF-11 For Other Reason", "Sick Memo", 
-            "Exam NOC", "DAR/Vigilance NOC", "PME Memo", "SF-11 Punishment Order"
-        ])
-
-        # Employee Selection
-        emp_df['Display'] = emp_df['pf_number'] + " - " + emp_df['employee_name_english']
-        selected_emp = st.selectbox("Select Employee", emp_df['Display'])
-        row = emp_df[emp_df['Display'] == selected_emp].iloc[0]
-
-        # Context Preparation
-        ctx = {
-            "EmployeeName": row['employee_name_hindi'],
-            "Designation": row['designation_hindi'],
-            "PFNumber": row['pf_number'],
-            "Unit": row['unit'],
-            "UnitNumber": row['unit'],
-            "LetterDate": date.today().strftime("%d-%m-%Y"),
-            "Date": date.today().strftime("%d-%m-%Y")
-        }
-
-        # Extra Fields based on Letter Type
-        if letter_type == "Duty Letter (For Absent)":
-            fd = st.date_input("From Date")
-            td = st.date_input("To Date")
-            ctx.update({"FromDate": fd.strftime("%d-%m-%Y"), "ToDate": td.strftime("%d-%m-%Y"), "DutyDate": (td + timedelta(days=1)).strftime("%d-%m-%Y")})
+    if not emp_df.empty:
+        # 'PF No.' और 'Employee Name in Hindi' का उपयोग करके लिस्ट बनाना
+        emp_df['Display'] = emp_df['PF No.'].astype(str) + " - " + emp_df['Employee Name in Hindi'].astype(str)
         
-        elif letter_type == "SF-11 Punishment Order":
-            # SF-11 Register से पुराना पत्र चुनें
-            sf_reg = get_sf11_register()
-            selected_charge = st.selectbox("Select Charge-Sheet No", sf_reg[sf_reg['pf_number']==row['pf_number']]['letter_no'])
-            ctx.update({"LetterNo.": selected_charge, "Dandadesh": f"{selected_charge}/D-1", "Memo": "एक वर्ष की वेतन वृद्धि रोकी जाती है..."})
+        menu = st.sidebar.radio("Menu", ["Letter Generation", "Quarter Management", "SF-11 Records"])
 
-        if st.button("Generate Letter & Update Database"):
-            t_path = f"assets/{letter_type.replace(' ', '_')}_temp.docx"
-            result = generate_doc(t_path, ctx, "letter.docx")
+        # --- TAB: LETTER GENERATION ---
+        if menu == "Letter Generation":
+            letter = st.selectbox("Select Letter Type", [
+                "Absent Duty letter temp", "SF-11 temp", "SF-11 Punishment order temp", 
+                "SICK MEMO temp.", "Exam NOC Letter temp", "DAR NOC temp", "pme_memo_temp"
+            ])
             
-            if result:
-                st.download_button("⬇️ Download Word File", result, file_name=f"{letter_type}.docx")
-                
-                # Update SF-11 Register in Firestore
-                if "SF-11" in letter_type:
-                    db.collection("sf11_register").add({
-                        "pf_number": ctx["PFNumber"],
-                        "employee_name": ctx["EmployeeName"],
-                        "letter_no": ctx.get("LetterNo.", "NEW-SF11"),
-                        "date": datetime.now(),
-                        "memo": ctx.get("Memo", "Admin Action")
-                    })
-                    st.success("Cloud Register Updated!")
+            sel_display = st.selectbox("Select Employee", emp_df['Display'])
+            row = emp_df[emp_df['Display'] == sel_display].iloc[0]
 
-    # --- TAB: QUARTER ALLOTMENT ---
-    elif menu == "Quarter Allotment":
-        st.subheader("🏠 क्लाउड क्वार्टर आवंटन")
-        vacant_qs = q_df[q_df['current_status'] == 'Vacant']
-        
-        selected_q = st.selectbox("Select Vacant Quarter", vacant_qs['quarter_number'] if not vacant_qs.empty else ["No Vacant Quarters"])
-        target_emp = st.selectbox("Assign To", emp_df['Display'])
-        emp_row = emp_df[emp_df['Display'] == target_emp].iloc[0]
-        
-        if st.button("Allot Quarter & Generate Letter"):
-            # 1. Update Quarter Status
-            q_id = f"{emp_row['unit']}_{selected_q}"
-            db.collection("master_quarters").document(q_id).update({
-                "current_status": "Occupied",
-                "last_occupant_id": emp_row['pf_number']
-            })
-            
-            # 2. Update History
-            db.collection("quarter_history").add({
-                "hrms_id": emp_row['pf_number'],
-                "quarter_number": selected_q,
-                "is_current": True,
-                "allotment_date": datetime.now()
-            })
-            
-            # 3. Generate Allotment Letter
-            q_ctx = {"EmployeeName": emp_row['employee_name_hindi'], "QuarterNo": selected_q, "LetterDate": date.today().strftime("%d-%m-%Y")}
-            allot_doc = generate_doc("assets/Quarter_Allotment_temp.docx", q_ctx, "Allotment.docx")
-            st.download_button("Download Allotment Letter", allot_doc, file_name=f"Allotment_{selected_q}.docx")
-            st.success("Quarter Master & History Updated in Firestore!")
+            # Firestore के सटीक स्पेस वाले हेडर्स का उपयोग
+            ctx = {
+                "EmployeeName": row.get('Employee Name in Hindi', ''),
+                "Designation": row.get('Designation in Hindi', ''),
+                "PFNumber": row.get('PF No.', ''),
+                "Unit": row.get('UNIT / MUSTER NUMBER', '')[:2] if row.get('UNIT / MUSTER NUMBER') else '',
+                "UnitNumber": row.get('UNIT / MUSTER NUMBER', ''),
+                "LetterDate": date.today().strftime("%d-%m-%Y"),
+                "Date": date.today().strftime("%d-%m-%Y")
+            }
 
-    # --- TAB: SF-11 REGISTER VIEW ---
-    elif menu == "SF-11 Register":
-        st.subheader("📊 SF-11 डिजिटल मास्टर रजिस्टर")
-        df_sf = get_sf11_register()
-        st.dataframe(df_sf, use_container_width=True)
+            # PME के लिए विशेष गणना (DOB और DOA)
+            if "pme" in letter.lower():
+                dob = pd.to_datetime(row.get('DOB')).date()
+                doa = pd.to_datetime(row.get('DOA')).date()
+                age = relativedelta(date.today(), dob).years
+                ctx.update({
+                    "dob": dob.strftime("%d-%m-%Y"),
+                    "doa": doa.strftime("%d-%m-%Y"),
+                    "age": age,
+                    "father_name": row.get("FATHER'S NAME", 'N/A')
+                })
+
+            if st.button("Generate & Sync"):
+                doc_io = generate_docx(letter, ctx)
+                if doc_io:
+                    st.download_button("⬇️ Download Document", doc_io, file_name=f"{letter}.docx")
+                    
+                    # SF-11 का डेटा Firestore में अपडेट करना
+                    if "SF-11" in letter:
+                        db.collection("sf11_register").add({
+                            "PF No.": ctx["PFNumber"],
+                            "Employee Name": ctx["EmployeeName"],
+                            "Letter Type": letter,
+                            "Timestamp": datetime.now(),
+                            "Status": "Generated"
+                        })
+                        st.success("Firestore SF-11 Register Updated!")
+
+        # --- TAB: QUARTER MANAGEMENT ---
+        elif menu == "Quarter Management":
+            st.subheader("🏠 Quarter Allotment (Live Status)")
+            # यहाँ भी स्पेस वाले हेडर्स 'STATION' और 'QUARTER NO.'
+            vacant_qs = q_df[q_df['STATUS'] == 'Vacant']
+            
+            q_choice = st.selectbox("Select Quarter", vacant_qs['QUARTER NO.'] if not vacant_qs.empty else ["No Vacancy"])
+            emp_choice = st.selectbox("Assign To", emp_df['Display'])
+            target_row = emp_df[emp_df['Display'] == emp_choice].iloc[0]
+
+            if st.button("Allot & Update Cloud"):
+                # Firestore में क्वार्टर का स्टेटस बदलना
+                q_doc_id = f"{target_row['UNIT / MUSTER NUMBER']}_{q_choice}"
+                db.collection("master_quarters").document(q_doc_id).update({
+                    "STATUS": "Occupied",
+                    "PF No.": target_row['PF No.'],
+                    "OCCUPIED DATE": date.today().strftime("%d-%m-%Y")
+                })
+                st.success(f"Quarter {q_choice} is now Occupied by {target_row['Employee Name in Hindi']}")
+
+        # --- TAB: SF-11 RECORDS ---
+        elif menu == "SF-11 Records":
+            st.subheader("📊 Cloud SF-11 Register")
+            sf_logs = get_cloud_data("sf11_register")
+            st.dataframe(sf_logs, use_container_width=True)
 
 else:
-    st.warning("Please enter the correct password in the sidebar.")
+    st.warning("Please enter correct password to access cloud database.")
