@@ -37,7 +37,9 @@ def generate_doc(template_name, context):
     doc = Document(path)
     def replace_tags(text, ctx):
         for k, v in ctx.items():
-            text = text.replace(f"[{k}]", str(v if v is not None else "")).replace(f"{{{{ {k} }}}}", str(v if v is not None else "")).replace(f"{{{{{k}}}}}", str(v if v is not None else ""))
+            text = text.replace(f"[{k}]", str(v if v is not None else ""))
+            text = text.replace(f"{{{{ {k} }}}}", str(v if v is not None else ""))
+            text = text.replace(f"{{{{{k}}}}}", str(v if v is not None else ""))
         return text
 
     for p in doc.paragraphs: p.text = replace_tags(p.text, context)
@@ -61,8 +63,7 @@ if st.sidebar.text_input("Admin Password", type="password") == st.secrets.get("P
     sf_reg_df = get_cloud_data('sf11_register')
 
     if not emp_df.empty:
-        # Handling PF No and Name as strings for display
-        emp_df['Display'] = emp_df['PF No.'].astype(str) + " - " + emp_df['Employee Name in Hindi'].astype(str)
+        emp_df['Display'] = emp_df['PF No.'].astype(str).str.replace('.0', '', regex=False) + " - " + emp_df['Employee Name in Hindi'].astype(str)
         
         tab = st.sidebar.radio("Navigation", ["Letter Generation", "Digital Registers", "Quarter Management"])
 
@@ -72,49 +73,53 @@ if st.sidebar.text_input("Admin Password", type="password") == st.secrets.get("P
                 "SICK MEMO temp.", "Exam NOC Letter temp", "pme_memo_temp"
             ])
 
-            # --- CASE 1: SF-11 PUNISHMENT ORDER (Data from Register) ---
+            # --- CASE 1: SF-11 PUNISHMENT ORDER ---
             if "Punishment order" in letter_opt:
                 if not sf_reg_df.empty:
-                    # FIXING THE REDACTED ERROR: Convert columns to string and handle NaN values
-                    sf_reg_df['पी.एफ. क्रमांक'] = sf_reg_df['पी.एफ. क्रमांक'].fillna('').astype(str)
-                    sf_reg_df['पत्र क्र.'] = sf_reg_df['पत्र क्र.'].fillna('').astype(str)
-                    sf_reg_df['दिनांक'] = sf_reg_df['दिनांक'].fillna('').astype(str)
-                    
-                    sf_reg_df['SF_Display'] = sf_reg_df['पी.एफ. क्रमांक'] + " | " + sf_reg_df['पत्र क्र.'] + " (" + sf_reg_df['दिनांक'] + ")"
+                    # Clean and format for display
+                    sf_reg_df = sf_reg_df.fillna('')
+                    sf_reg_df['पी.एफ. क्रमांक'] = sf_reg_df['पी.एफ. क्रमांक'].astype(str).str.replace('.0', '', regex=False)
+                    sf_reg_df['SF_Display'] = sf_reg_df['पी.एफ. क्रमांक'] + " | " + sf_reg_df['पत्र क्र.'].astype(str) + " (" + sf_reg_df['दिनांक'].astype(str) + ")"
                     
                     selected_sf = st.selectbox("रजिस्टर से चार्जशीट चुनें (Auto-fill)", sf_reg_df['SF_Display'])
                     sf_row = sf_reg_df[sf_reg_df['SF_Display'] == selected_sf].iloc[0]
                     
                     ctx = {
-                        "EmployeeName": sf_row.get('कर्मचारी का नाम', ''),
-                        "Designation": sf_row.get('पदनाम', ''),
-                        "PFNumber": sf_row.get('पी.एफ. क्रमांक', ''),
-                        "LetterNo.": sf_row.get('पत्र क्र.', ''),
-                        "SF-11Date": sf_row.get('दिनांक', ''),
-                        "Unit": "SGAM",
+                        "EmployeeName": sf_row['कर्मचारी का नाम'],
+                        "Designation": sf_row['पदनाम'],
+                        "PFNumber": sf_row['पी.एफ. क्रमांक'],
+                        "LetterNo.": sf_row['पत्र क्र.'],
+                        "SF-11Date": sf_row['दिनांक'],
                         "LetterDate": st.date_input("दण्डादेश जारी करने की दिनांक").strftime("%d-%m-%Y"),
-                        "Dandadesh": st.text_input("दण्डादेश क्रमांक (Order No.)", value="SGAM/SF-11/Order/"),
-                        "Memo": st.text_area("दण्ड का विवरण (Punishment Description)")
+                        "Dandadesh": st.text_input("दण्डादेश क्रमांक", value="SGAM/SF-11/Order/"),
+                        "Memo": st.text_area("दण्ड का विवरण"),
+                        "Unit": "SGAM"
                     }
 
-                    if st.button("Generate Punishment Order & Update Register"):
+                    if st.button("Generate Punishment Order & Update"):
                         p_doc = generate_doc(letter_opt, ctx)
                         if p_doc:
-                            st.download_button("⬇️ Download Punishment Order", p_doc, file_name=f"Punishment_{ctx['PFNumber']}.docx")
-                            # Add update to register
-                            new_entry = sf_row.to_dict()
-                            new_entry.update({
+                            st.download_button("⬇️ Download Document", p_doc, file_name=f"Punishment_{ctx['PFNumber']}.docx")
+                            
+                            # CRITICAL FIX: Convert Pandas Row to pure Python Dictionary and handle NaT/NaN
+                            entry_dict = sf_row.to_dict()
+                            # Clean dictionary for Firestore
+                            clean_entry = {k: (str(v) if pd.notna(v) else "") for k, v in entry_dict.items()}
+                            clean_entry.update({
                                 "दण्‍डादेश क्रमांक": ctx["Dandadesh"],
                                 "दण्‍डादेश जारी करने का दिनांक": ctx["LetterDate"],
                                 "दण्‍ड का विवरण": ctx["Memo"],
                                 "रिमार्क": "Punishment Issued"
                             })
-                            db.collection("sf11_register").add(new_entry)
-                            st.success("Punishment Updated in Register!")
+                            # Delete temporary helper key before saving
+                            if "SF_Display" in clean_entry: del clean_entry["SF_Display"]
+                            
+                            db.collection("sf11_register").add(clean_entry)
+                            st.success("रजिस्टर में दण्डादेश की जानकारी अपडेट कर दी गई है।")
                 else:
-                    st.warning("SF-11 रजिस्टर में कोई पिछला रिकॉर्ड नहीं मिला।")
+                    st.warning("रजिस्टर खाली है।")
 
-            # --- CASE 2: ABSENT DUTY + SF-11 ---
+            # --- CASE 2: ABSENT CASE (DUTY + SF-11) ---
             elif "Absent" in letter_opt:
                 sel_name = st.selectbox("कर्मचारी चुनें", emp_df['Display'])
                 row = emp_df[emp_df['Display'] == sel_name].iloc[0]
@@ -125,64 +130,45 @@ if st.sidebar.text_input("Admin Password", type="password") == st.secrets.get("P
                 total_days = (t_dt - f_dt).days + 1
                 
                 ctx = {
-                    "EmployeeName": row.get('Employee Name in Hindi', ''),
-                    "Designation": row.get('Designation in Hindi', ''),
-                    "PFNumber": row.get('PF No.', ''),
-                    "UnitNumber": row.get('UNIT / MUSTER NUMBER', ''),
+                    "EmployeeName": row['Employee Name in Hindi'],
+                    "Designation": row['Designation in Hindi'],
+                    "PFNumber": str(row['PF No.']).replace('.0', ''),
                     "FromDate": f_dt.strftime("%d-%m-%Y"),
                     "ToDate": t_dt.strftime("%d-%m-%Y"),
                     "DutyDate": (t_dt + timedelta(days=1)).strftime("%d-%m-%Y"),
                     "LetterDate": date.today().strftime("%d-%m-%Y"),
-                    "Date": date.today().strftime("%d-%m-%Y"),
                     "ShortName": "STF", "Unit": "SGAM"
                 }
 
-                st.divider()
-                gen_sf11 = st.checkbox("साथ में SF-11 चार्जशीट भी जनरेट करें?", value=True)
+                gen_sf11 = st.checkbox("SF-11 भी जनरेट करें?", value=True)
                 if gen_sf11:
-                    absent_memo = f"आप बिना किसी पूर्व सूचना के दिनांक {ctx['FromDate']} से {ctx['ToDate']} तक कुल {total_days} दिवस कार्य से अनुपस्थित थे, जो कि रेल सेवक होने के नाते आपकी रेल सेवा निष्ठा के प्रति घोर लापरवाही को प्रदर्शित करता है। अतः आप कामों व भूलो के फेहरिस्त धारा 1, 2 एवं 3 के उल्लंघन के दोषी पाए जाते है।"
-                    ctx["Memo"] = st.text_area("SF-11 आरोप (Memo)", value=absent_memo, height=150)
+                    ctx["Memo"] = st.text_area("SF-11 आरोप", value=f"आप दिनांक {ctx['FromDate']} से {ctx['ToDate']} तक कुल {total_days} दिवस अनुपस्थित थे...")
                     ctx["LetterNo."] = f"SGAM/SF11/ABS/{ctx['PFNumber']}"
 
                 if st.button("Generate Documents"):
                     d_doc = generate_doc("Absent Duty letter temp", ctx)
-                    if d_doc:
-                        st.download_button("⬇️ Download Duty Letter", d_doc, file_name="Duty_Letter.docx")
+                    if d_doc: st.download_button("⬇️ Download Duty Letter", d_doc, file_name="Duty.docx")
                     
                     if gen_sf11:
                         s_doc = generate_doc("SF-11 temp", ctx)
                         if s_doc:
-                            st.download_button("⬇️ Download SF-11 Charge-sheet", s_doc, file_name="SF11_ChargeSheet.docx")
+                            st.download_button("⬇️ Download SF-11", s_doc, file_name="SF11.docx")
                             db.collection("sf11_register").add({
                                 "स.क्र.": datetime.now().strftime("%Y%m%d%H%M"),
-                                "पी.एफ. क्रमांक": str(ctx["PFNumber"]),
+                                "पी.एफ. क्रमांक": ctx["PFNumber"],
                                 "कर्मचारी का नाम": ctx["EmployeeName"],
-                                "पदनाम": ctx["Designation"],
-                                "दिनांक": ctx["Date"],
+                                "दिनांक": ctx["LetterDate"],
                                 "पत्र क्र.": ctx["LetterNo."],
                                 "आरोप का विवरण": ctx["Memo"],
-                                "पिता का नाम": row.get("FATHER'S NAME", ""),
-                                "रिमार्क": "Absent Case Action"
+                                "रिमार्क": "Absent Action"
                             })
-                            st.success("SF-11 Register Updated!")
-
-            # --- CASE 3: OTHER LETTERS ---
-            else:
-                sel_name = st.selectbox("Select Employee", emp_df['Display'])
-                row = emp_df[emp_df['Display'] == sel_name].iloc[0]
-                # Standard Logic here (PME, Sick etc.)
+                            st.success("रजिस्टर अपडेट किया गया।")
 
         elif tab == "Digital Registers":
             st.subheader("📊 SF-11 मास्टर रजिस्टर")
             sf_logs = get_cloud_data("sf11_register")
             if not sf_logs.empty:
-                # Ensure all data is string for display
                 sf_logs = sf_logs.fillna('').astype(str)
-                cols = ["स.क्र.", "पी.एफ. क्रमांक", "कर्मचारी का नाम", "पदनाम", "पत्र क्र.", "दिनांक", "आरोप का विवरण", "दण्‍डादेश क्रमांक", "दण्‍डादेश जारी करने का दिनांक", "दण्‍ड का विवरण", "रिमार्क"]
-                st.dataframe(sf_logs.reindex(columns=cols), use_container_width=True)
-
-        elif tab == "Quarter Management":
-            # (Old Quarter logic here)
-            pass
+                st.dataframe(sf_logs, use_container_width=True)
 else:
     st.warning("Side menu में पासवर्ड दर्ज करें।")
