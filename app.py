@@ -87,7 +87,7 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
             f_dt = c1.date_input("अनुपस्थिति से")
             t_dt = c2.date_input("अनुपस्थिति तक")
             
-            if st.button("Generate Documents & Save"):
+            if st.button("Generate Documents"):
                 memo_main = f"आप दिनांक {f_dt.strftime('%d-%m-%Y')} से {t_dt.strftime('%d-%m-%Y')} तक बिना किसी पूर्व सूचना के अपने कार्य से अनुपस्थित रहे,"
                 full_memo = memo_main + LEGAL_ENDING
                 ctx = {
@@ -142,13 +142,12 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
             
             if reg_list:
                 reg_df = pd.DataFrame(reg_list)
-                # डिस्प्ले स्ट्रिंग में Date जोड़ी गई है
+                # डिस्प्ले में Name + Date
                 reg_df['Select_Disp'] = (reg_df['PFNumber'].astype(str) + " - " + 
                                        reg_df['EmployeeName'].astype(str) + " - SF11 Date: " + 
                                        reg_df['LetterDate'].astype(str))
                 
                 sel_text = st.selectbox("पेंडिंग केस चुनें", reg_df['Select_Disp'].unique())
-                # PF और Date से सही रिकॉर्ड पहचानें
                 selected_pf = sel_text.split(" - ")[0]
                 selected_date = sel_text.split(" - SF11 Date: ")[1]
                 case = reg_df[(reg_df['PFNumber'] == selected_pf) & (reg_df['LetterDate'] == selected_date)].iloc[0]
@@ -168,7 +167,10 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
 
                 if st.button("Generate Order & Update Firebase"):
                     ctx = {**case, "OrderNo": order_no, "OrderDate": order_date.strftime('%d-%m-%Y'), "PunishmentDetails": punishment_text}
-                    doc_bio = generate_doc("Order temp", ctx)
+                    
+                    # सुधार: यहाँ आपकी इमेज के अनुसार नया फाइल नाम इस्तेमाल किया गया है
+                    doc_bio = generate_doc("SF-11 Punishment order temp", ctx)
+                    
                     if doc_bio:
                         db.collection("sf11_register").document(case['doc_id']).update({
                             "OrderNo": order_no, "OrderDate": order_date.strftime('%d-%m-%Y'),
