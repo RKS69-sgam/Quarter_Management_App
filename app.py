@@ -53,8 +53,8 @@ def generate_doc(template_name, context):
     return bio
 
 # --- 4. MAIN UI ---
-st.set_page_config(page_title="Railway Admin Cloud", layout="wide")
-st.title("🚂 SSE/PW/SGAM - स्मार्ट एडमिन पोर्टल")
+st.set_page_config(page_title="Railway Admin Portal", layout="wide")
+st.title("🚂 SSE/PW/SGAM - एकीकृत क्लाउड प्रबंधन")
 
 if st.sidebar.text_input("Admin Password", type="password") == st.secrets.get("PASSWORD", "sgam@4321"):
     
@@ -63,23 +63,29 @@ if st.sidebar.text_input("Admin Password", type="password") == st.secrets.get("P
 
     tab = st.sidebar.radio("Navigation", ["Letter Generation", "Digital Registers", "Quarter Management"])
 
+    # --- सुनिश्चित करें कि आवश्यक कॉलम मौजूद हैं (KeyError Fix) ---
+    required_cols = ['दण्‍डादेश क्रमांक', 'अपील का दिनांक', 'अपील निर्णय', 'रिमार्क']
+    for col in required_cols:
+        if not sf_reg_df.empty and col not in sf_reg_df.columns:
+            sf_reg_df[col] = ""
+
     if tab == "Letter Generation":
         letter_opt = st.selectbox("पत्र का प्रकार चुनें", [
             "Absent Duty letter temp", "SF-11 temp", "SF-11 Punishment order temp", 
             "SICK MEMO temp.", "Exam NOC Letter temp", "pme_memo_temp"
         ])
 
-        # --- CASE 1: SF-11 PUNISHMENT ORDER (Smart Filtering) ---
+        # --- CASE 1: SF-11 PUNISHMENT ORDER ---
         if "Punishment order" in letter_opt:
             if not sf_reg_df.empty:
-                # Filter: Show only rows where 'दण्‍डादेश क्रमांक' is empty or NaN
-                pending_sf = sf_reg_df[sf_reg_df['दण्‍डादेश क्रमांक'].isna() | (sf_reg_df['दण्‍डादेश क्रमांक'] == '')]
+                # Filtering logic
+                pending_sf = sf_reg_df[sf_reg_df['दण्‍डादेश क्रमांक'].isna() | (sf_reg_df['दण्‍डादेश क्रमांक'].astype(str) == '')].copy()
                 
                 if not pending_sf.empty:
                     pending_sf['PF_Disp'] = pending_sf['पी.एफ. क्रमांक'].astype(str).str.replace('.0', '', regex=False)
-                    pending_sf['List_Display'] = pending_sf['PF_Disp'] + " | " + pending_sf['कर्मचारी का नाम'] + " (" + pending_sf['दिनांक'].astype(str) + ")"
+                    pending_sf['List_Display'] = pending_sf['PF_Disp'] + " | " + pending_sf['कर्मचारी का नाम'].astype(str) + " (" + pending_sf['दिनांक'].astype(str) + ")"
                     
-                    selected_val = st.selectbox("पेंडिंग चार्जशीट चुनें (Auto-fill)", pending_sf['List_Display'])
+                    selected_val = st.selectbox("पेंडिंग चार्जशीट चुनें", pending_sf['List_Display'])
                     sf_row = pending_sf[pending_sf['List_Display'] == selected_val].iloc[0]
                     
                     ctx = {
@@ -98,20 +104,20 @@ if st.sidebar.text_input("Admin Password", type="password") == st.secrets.get("P
                         p_doc = generate_doc(letter_opt, ctx)
                         if p_doc:
                             st.download_button("⬇️ Download Punishment Order", p_doc, file_name=f"Order_{ctx['PFNumber']}.docx")
-                            # Update existing row in Firestore
                             db.collection("sf11_register").document(sf_row['doc_id']).update({
                                 "दण्‍डादेश क्रमांक": ctx["Dandadesh"],
                                 "दण्‍डादेश जारी करने का दिनांक": ctx["LetterDate"],
                                 "दण्‍ड का विवरण": ctx["Memo"],
                                 "रिमार्क": "Punishment Issued"
                             })
-                            st.success("रजिस्टर अपडेट हो गया और कर्मचारी पेंडिंग लिस्ट से हट गया।")
+                            st.success("रजिस्टर अपडेट हो गया।")
+                            st.rerun()
                 else:
-                    st.info("सभी जारी चार्जशीट के दण्डादेश पूर्ण हो चुके हैं।")
+                    st.info("कोई पेंडिंग चार्जशीट नहीं मिली।")
             else:
-                st.warning("रजिस्टर में कोई डेटा नहीं है।")
+                st.warning("रजिस्टर खाली है।")
 
-        # --- CASE 2: ABSENT CASE (Duty + SF-11) ---
+        # --- CASE 2: ABSENT CASE ---
         elif "Absent" in letter_opt:
             emp_df['PF_Clean'] = emp_df['PF No.'].astype(str).str.replace('.0', '', regex=False)
             emp_df['Full_Disp'] = emp_df['PF_Clean'] + " - " + emp_df['Employee Name in Hindi']
@@ -137,55 +143,53 @@ if st.sidebar.text_input("Admin Password", type="password") == st.secrets.get("P
             }
 
             st.divider()
-            absent_memo = f"आप बिना किसी पूर्व सूचना के दिनांक {ctx['FromDate']} से {ctx['ToDate']} तक कुल {total_days} दिवस कार्य से अनुपस्थित थे..."
-            ctx["Memo"] = st.text_area("SF-11 आरोप", value=absent_memo)
+            ctx["Memo"] = st.text_area("SF-11 आरोप", value=f"आप दिनांक {ctx['FromDate']} से {ctx['ToDate']} तक कार्य से अनुपस्थित थे...")
             ctx["LetterNo."] = f"SGAM/SF11/ABS/{ctx['PFNumber']}"
 
             if st.button("Generate Documents"):
-                # Download Buttons
                 d_doc = generate_doc("Absent Duty letter temp", ctx)
                 s_doc = generate_doc("SF-11 temp", ctx)
-                
                 if d_doc: st.download_button("⬇️ Download Duty Letter", d_doc, file_name="Duty.docx")
-                if s_doc: st.download_button("⬇️ Download SF-11", s_doc, file_name="SF11.docx")
-                
-                # Add to Register
-                db.collection("sf11_register").add({
-                    "स.क्र.": datetime.now().strftime("%Y%m%d%H%M"),
-                    "पी.एफ. क्रमांक": ctx["PFNumber"],
-                    "कर्मचारी का नाम": ctx["EmployeeName"],
-                    "पदनाम": ctx["Designation"],
-                    "दिनांक": ctx["Date"],
-                    "पत्र क्र.": ctx["LetterNo."],
-                    "आरोप का विवरण": ctx["Memo"],
-                    "रिमार्क": "Absent Case Registered"
-                })
-                st.success("Record Saved in SF-11 Register.")
+                if s_doc: 
+                    st.download_button("⬇️ Download SF-11", s_doc, file_name="SF11.docx")
+                    db.collection("sf11_register").add({
+                        "स.क्र.": datetime.now().strftime("%Y%m%d%H%M"),
+                        "पी.एफ. क्रमांक": ctx["PFNumber"],
+                        "कर्मचारी का नाम": ctx["EmployeeName"],
+                        "पदनाम": ctx["Designation"],
+                        "दिनांक": ctx["Date"],
+                        "पत्र क्र.": ctx["LetterNo."],
+                        "आरोप का विवरण": ctx["Memo"],
+                        "दण्‍डादेश क्रमांक": "",
+                        "रिमार्क": "Absent Case Action"
+                    })
+                    st.success("Record Saved in Cloud!")
 
     elif tab == "Digital Registers":
         st.subheader("📊 SF-11 मास्टर रजिस्टर")
         if not sf_reg_df.empty:
             sf_reg_df = sf_reg_df.fillna('')
-            display_df = sf_reg_df.drop(columns=['doc_id']).astype(str)
-            st.dataframe(display_df, use_container_width=True)
+            st.dataframe(sf_reg_df.drop(columns=['doc_id']).astype(str), use_container_width=True)
             
             st.divider()
-            st.subheader("📝 अपील / रिमार्क अपडेट करें")
-            edit_pf = st.selectbox("अपडेट करने के लिए कर्मचारी चुनें", sf_reg_df['पी.एफ. क्रमांक'] + " - " + sf_reg_df['कर्मचारी का नाम'])
-            edit_row = sf_reg_df[sf_reg_df['पी.एफ. क्रमांक'] + " - " + sf_reg_df['कर्मचारी का नाम'] == edit_pf].iloc[0]
+            st.subheader("📝 अपील एवं रिमार्क अपडेट करें")
+            edit_pf = st.selectbox("अपडेट के लिए कर्मचारी चुनें", sf_reg_df['पी.एफ. क्रमांक'].astype(str) + " - " + sf_reg_df['कर्मचारी का नाम'])
+            edit_row = sf_reg_df[sf_reg_df['पी.एफ. क्रमांक'].astype(str) + " - " + sf_reg_df['कर्मचारी का नाम'] == edit_pf].iloc[0]
             
-            col1, col2 = st.columns(2)
-            ap_date = col1.text_input("अपील का दिनांक", value=edit_row.get('अपील का दिनांक', ''))
-            ap_dec = col2.text_area("अपील निर्णय / रिमार्क", value=edit_row.get('अपील निर्णय', ''))
+            c1, c2 = st.columns(2)
+            ap_date = c1.text_input("अपील का दिनांक", value=edit_row.get('अपील का दिनांक', ''))
+            ap_dec = c2.text_area("अपील निर्णय / रिमार्क", value=edit_row.get('अपील निर्णय', ''))
             
             if st.button("Save Appeal Details"):
                 db.collection("sf11_register").document(edit_row['doc_id']).update({
                     "अपील का दिनांक": ap_date,
                     "अपील निर्णय": ap_dec,
-                    "रिमार्क": "Updated via Portal"
+                    "रिमार्क": "Updated via Appeal Section"
                 })
-                st.success("Details Updated!")
+                st.success("विवरण सुरक्षित कर दिया गया है।")
                 st.rerun()
+        else:
+            st.info("रजिस्टर खाली है।")
 
 else:
-    st.warning("Side menu में पासवर्ड दर्ज करें।")
+    st.warning("साइडबार में पासवर्ड दर्ज करें।")
