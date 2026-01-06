@@ -35,6 +35,7 @@ def safe_replace(paragraph, context):
     original_text = full_text
     for key, val in context.items():
         placeholder = f"[{key}]"
+        # Case-insensitive mapping for LetterNo. and SF-11Date
         if placeholder in full_text:
             full_text = full_text.replace(placeholder, str(val) if val is not None else "")
     if full_text != original_text:
@@ -87,9 +88,10 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
             f_dt = c1.date_input("अनुपस्थिति से")
             t_dt = c2.date_input("अनुपस्थिति तक")
             
-            if st.button("Generate Documents"):
+            if st.button("Generate Documents & Save to Register"):
                 memo_main = f"आप दिनांक {f_dt.strftime('%d-%m-%Y')} से {t_dt.strftime('%d-%m-%Y')} तक बिना किसी पूर्व सूचना के अपने कार्य से अनुपस्थित रहे,"
                 full_memo = memo_main + LEGAL_ENDING
+                
                 ctx = {
                     "EmployeeName": r['Employee Name in Hindi'],
                     "Designation": r['Designation in Hindi'],
@@ -101,11 +103,15 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
                     "LetterNo": f"SGAM/SF-11/{r['PF No.']}",
                     "Memo": full_memo
                 }
+
                 d_doc = generate_doc("Absent Duty letter temp", ctx)
                 s_doc = generate_doc("SF-11 temp", ctx)
-                if d_doc: st.download_button("⬇️ Duty Letter", d_doc, f"Duty_{ctx['PFNumber']}.docx")
-                if s_doc: st.download_button("⬇️ SF-11", s_doc, f"SF11_{ctx['PFNumber']}.docx")
+                
+                if d_doc: st.download_button("⬇️ Download Duty Letter", d_doc, f"Duty_{ctx['PFNumber']}.docx")
+                if s_doc: st.download_button("⬇️ Download SF-11", s_doc, f"SF11_{ctx['PFNumber']}.docx")
+                
                 db.collection("sf11_register").add({**ctx, "status": "Issued", "timestamp": datetime.now()})
+                st.success("रजिस्टर में डेटा सुरक्षित कर दिया गया है।")
 
     # --- TAB 2: OTHER SF-11 & ORDER ---
     elif tab == "Other SF-11/Order":
@@ -117,6 +123,7 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
                 sel = st.selectbox("कर्मचारी", emp_df['Full_Disp'])
                 r = emp_df[emp_df['PF No.'].astype(str) == sel.split(" - ")[0]].iloc[0]
                 user_memo = st.text_area("आरोप का विवरण लिखें")
+                
                 if st.button("Generate SF-11"):
                     ctx = {
                         "EmployeeName": r['Employee Name in Hindi'],
@@ -142,7 +149,7 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
             
             if reg_list:
                 reg_df = pd.DataFrame(reg_list)
-                # डिस्प्ले में Name + Date
+                # पेंडिंग लिस्ट में Name + Date
                 reg_df['Select_Disp'] = (reg_df['PFNumber'].astype(str) + " - " + 
                                        reg_df['EmployeeName'].astype(str) + " - SF11 Date: " + 
                                        reg_df['LetterDate'].astype(str))
@@ -153,7 +160,7 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
                 case = reg_df[(reg_df['PFNumber'] == selected_pf) & (reg_df['LetterDate'] == selected_date)].iloc[0]
                 
                 c1, c2 = st.columns(2)
-                order_no = c1.text_input("दण्‍डादेश क्रमांक", value=f"SGAM/NIP/{case['PFNumber']}")
+                dandadesh_no = c1.text_input("दण्‍डादेश क्रमांक", value=f"SGAM/NIP/{case['PFNumber']}")
                 order_date = c2.date_input("दण्‍डादेश दिनांक", value=date.today())
                 
                 punishment_text = st.selectbox("दण्ड का प्रकार चुनें", [
@@ -165,20 +172,32 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
                     "आगामी देय दो सेट PTO तत्काल प्रभाव से रोके जाने के दंड से दंडित किया जाता है।"
                 ])
 
-                if st.button("Generate Order & Update Firebase"):
-                    ctx = {**case, "OrderNo": order_no, "OrderDate": order_date.strftime('%d-%m-%Y'), "PunishmentDetails": punishment_text}
+                if st.button("Generate Order & Update Database"):
+                    # इमेज के प्लेसहोल्डर्स के अनुसार मैपिंग
+                    ctx = {
+                        "EmployeeName": case.get('EmployeeName', ''),
+                        "Unit": case.get('Designation', ''),
+                        "Dandadesh": dandadesh_no,
+                        "LetterNo.": case.get('LetterNo', ''),
+                        "SF-11Date": case.get('LetterDate', ''),
+                        "OrderDate": order_date.strftime('%d-%m-%Y'),
+                        "Memo": punishment_text  # [Memo] में अब दण्ड का विवरण दिखेगा
+                    }
                     
-                    # सुधार: यहाँ आपकी इमेज के अनुसार नया फाइल नाम इस्तेमाल किया गया है
+                    # इमेज के अनुसार फाइल नाम का उपयोग
                     doc_bio = generate_doc("SF-11 Punishment order temp", ctx)
                     
                     if doc_bio:
                         db.collection("sf11_register").document(case['doc_id']).update({
-                            "OrderNo": order_no, "OrderDate": order_date.strftime('%d-%m-%Y'),
-                            "PunishmentDetails": punishment_text, "status": "Closed/Punished"
+                            "OrderNo": dandadesh_no,
+                            "OrderDate": order_date.strftime('%d-%m-%Y'),
+                            "PunishmentDetails": punishment_text,
+                            "status": "Closed/Punished"
                         })
-                        st.success("डेटाबेस अपडेट हुआ!")
-                        st.download_button("⬇️ Download Order", doc_bio, f"Order_{case['PFNumber']}.docx")
-            else: st.warning("कोई पेंडिंग केस नहीं मिला।")
+                        st.success("✅ डेटाबेस अपडेट हुआ और दंडादेश तैयार है!")
+                        st.download_button("⬇️ Download NIP", doc_bio, f"Order_{case['PFNumber']}.docx")
+            else:
+                st.warning("कोई पेंडिंग केस नहीं मिला।")
 
     # --- TAB 3: REGISTER & IMPORT ---
     elif tab == "SF-11 Register & Import":
@@ -198,7 +217,6 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
                                 "LetterDate": str(row.get('दिनांक', '')).strip(),
                                 "Memo": str(row.get('आरोप का विवरण', '')).strip(),
                                 "OrderNo": str(row.get('दण्‍डादेश क्रमांक', '')).replace('nan',''),
-                                "PunishmentDetails": str(row.get('दण्‍ड का विवरण', '')).replace('nan',''),
                                 "status": "Imported", "timestamp": datetime.now()
                             })
                         st.success("इंपोर्ट पूरा हुआ!")
