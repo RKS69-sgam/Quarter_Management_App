@@ -62,7 +62,6 @@ st.set_page_config(page_title="Railway Admin Pro", layout="wide")
 
 if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWORD", "sgam@4321"):
     
-    # Load Employee Master Data
     emp_stream = db.collection('employees').stream()
     emp_list = [d.to_dict() for d in emp_stream]
     emp_df = pd.DataFrame(emp_list) if emp_list else pd.DataFrame()
@@ -88,10 +87,9 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
             f_dt = c1.date_input("अनुपस्थिति से")
             t_dt = c2.date_input("अनुपस्थिति तक")
             
-            if st.button("Generate Documents & Save to Register"):
+            if st.button("Generate Documents & Save"):
                 memo_main = f"आप दिनांक {f_dt.strftime('%d-%m-%Y')} से {t_dt.strftime('%d-%m-%Y')} तक बिना किसी पूर्व सूचना के अपने कार्य से अनुपस्थित रहे,"
                 full_memo = memo_main + LEGAL_ENDING
-                
                 ctx = {
                     "EmployeeName": r['Employee Name in Hindi'],
                     "Designation": r['Designation in Hindi'],
@@ -103,15 +101,11 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
                     "LetterNo": f"SGAM/SF-11/{r['PF No.']}",
                     "Memo": full_memo
                 }
-
                 d_doc = generate_doc("Absent Duty letter temp", ctx)
                 s_doc = generate_doc("SF-11 temp", ctx)
-                
-                if d_doc: st.download_button("⬇️ Download Duty Letter", d_doc, f"Duty_{ctx['PFNumber']}.docx")
-                if s_doc: st.download_button("⬇️ Download SF-11", s_doc, f"SF11_{ctx['PFNumber']}.docx")
-                
+                if d_doc: st.download_button("⬇️ Duty Letter", d_doc, f"Duty_{ctx['PFNumber']}.docx")
+                if s_doc: st.download_button("⬇️ SF-11", s_doc, f"SF11_{ctx['PFNumber']}.docx")
                 db.collection("sf11_register").add({**ctx, "status": "Issued", "timestamp": datetime.now()})
-                st.success("रजिस्टर में डेटा सुरक्षित कर दिया गया है।")
 
     # --- TAB 2: OTHER SF-11 & ORDER ---
     elif tab == "Other SF-11/Order":
@@ -123,7 +117,6 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
                 sel = st.selectbox("कर्मचारी", emp_df['Full_Disp'])
                 r = emp_df[emp_df['PF No.'].astype(str) == sel.split(" - ")[0]].iloc[0]
                 user_memo = st.text_area("आरोप का विवरण लिखें")
-                
                 if st.button("Generate SF-11"):
                     ctx = {
                         "EmployeeName": r['Employee Name in Hindi'],
@@ -139,25 +132,26 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
                         db.collection("sf11_register").add({**ctx, "status": "Issued", "timestamp": datetime.now()})
 
         elif mode == "दण्‍डादेश (Punishment Order)":
-            st.subheader("🔨 दण्‍डादेश (NIP) जनरेट और रजिस्टर अपडेट")
-            
-            # सुधार: सभी डेटा को स्ट्रीम करें और केवल वही दिखाएं जिनमें OrderNo नहीं है
+            st.subheader("🔨 दण्‍डादेश (NIP) जनरेट और अपडेट")
             docs = db.collection("sf11_register").stream()
             reg_list = []
             for d in docs:
-                item = d.to_dict()
-                item['doc_id'] = d.id
-                # पेंडिंग चेक: अगर OrderNo नहीं है या 'nan' है
+                item = d.to_dict(); item['doc_id'] = d.id
                 if not item.get('OrderNo') or str(item.get('OrderNo')).lower() == 'nan' or item.get('OrderNo') == "":
                     reg_list.append(item)
             
             if reg_list:
                 reg_df = pd.DataFrame(reg_list)
-                reg_df['Select_Disp'] = reg_df['PFNumber'].astype(str) + " - " + reg_df['EmployeeName'].astype(str)
+                # डिस्प्ले स्ट्रिंग में Date जोड़ी गई है
+                reg_df['Select_Disp'] = (reg_df['PFNumber'].astype(str) + " - " + 
+                                       reg_df['EmployeeName'].astype(str) + " - SF11 Date: " + 
+                                       reg_df['LetterDate'].astype(str))
                 
-                sel_text = st.selectbox("पेंडिंग केस चुनें (कुल: " + str(len(reg_df)) + ")", reg_df['Select_Disp'].unique())
+                sel_text = st.selectbox("पेंडिंग केस चुनें", reg_df['Select_Disp'].unique())
+                # PF और Date से सही रिकॉर्ड पहचानें
                 selected_pf = sel_text.split(" - ")[0]
-                case = reg_df[reg_df['PFNumber'] == selected_pf].iloc[0]
+                selected_date = sel_text.split(" - SF11 Date: ")[1]
+                case = reg_df[(reg_df['PFNumber'] == selected_pf) & (reg_df['LetterDate'] == selected_date)].iloc[0]
                 
                 c1, c2 = st.columns(2)
                 order_no = c1.text_input("दण्‍डादेश क्रमांक", value=f"SGAM/NIP/{case['PFNumber']}")
@@ -172,42 +166,26 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
                     "आगामी देय दो सेट PTO तत्काल प्रभाव से रोके जाने के दंड से दंडित किया जाता है।"
                 ])
 
-                if st.button("Generate Order & Update Database"):
-                    ctx = {
-                        "EmployeeName": case.get('EmployeeName', ''),
-                        "Designation": case.get('Designation', ''),
-                        "PFNumber": case.get('PFNumber', ''),
-                        "LetterNo": case.get('LetterNo', ''),
-                        "LetterDate": case.get('LetterDate', ''),
-                        "Memo": case.get('Memo', ''),
-                        "OrderNo": order_no,
-                        "OrderDate": order_date.strftime('%d-%m-%Y'),
-                        "PunishmentDetails": punishment_text
-                    }
-                    
+                if st.button("Generate Order & Update Firebase"):
+                    ctx = {**case, "OrderNo": order_no, "OrderDate": order_date.strftime('%d-%m-%Y'), "PunishmentDetails": punishment_text}
                     doc_bio = generate_doc("Order temp", ctx)
                     if doc_bio:
                         db.collection("sf11_register").document(case['doc_id']).update({
-                            "OrderNo": order_no,
-                            "OrderDate": order_date.strftime('%d-%m-%Y'),
-                            "PunishmentDetails": punishment_text,
-                            "status": "Closed/Punished"
+                            "OrderNo": order_no, "OrderDate": order_date.strftime('%d-%m-%Y'),
+                            "PunishmentDetails": punishment_text, "status": "Closed/Punished"
                         })
-                        st.success(f"✅ डेटाबेस अपडेट हुआ!")
+                        st.success("डेटाबेस अपडेट हुआ!")
                         st.download_button("⬇️ Download Order", doc_bio, f"Order_{case['PFNumber']}.docx")
-            else:
-                st.warning("कोई पेंडिंग केस नहीं मिला जिसमें दंडादेश जारी करना बाकी हो।")
+            else: st.warning("कोई पेंडिंग केस नहीं मिला।")
 
     # --- TAB 3: REGISTER & IMPORT ---
     elif tab == "SF-11 Register & Import":
         st.subheader("📊 रजिस्टर और डेटा मैनेजमेंट")
-        
         with st.expander("📥 Excel से पुराना डेटा इंपोर्ट करें"):
             file = st.file_uploader("Upload Excel", type=["xlsx"])
             if file:
                 try:
                     df_imp = pd.read_excel(file, dtype=str, engine='openpyxl')
-                    st.dataframe(df_imp.head())
                     if st.button("Confirm Bulk Upload"):
                         for _, row in df_imp.iterrows():
                             db.collection("sf11_register").add({
@@ -219,19 +197,13 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
                                 "Memo": str(row.get('आरोप का विवरण', '')).strip(),
                                 "OrderNo": str(row.get('दण्‍डादेश क्रमांक', '')).replace('nan',''),
                                 "PunishmentDetails": str(row.get('दण्‍ड का विवरण', '')).replace('nan',''),
-                                "status": "Imported",
-                                "timestamp": datetime.now()
+                                "status": "Imported", "timestamp": datetime.now()
                             })
                         st.success("इंपोर्ट पूरा हुआ!")
                 except Exception as e: st.error(f"Error: {e}")
-
-        # View Register
+        
         all_reg = [d.to_dict() for d in db.collection("sf11_register").stream()]
-        if all_reg:
-            st.write(f"### कुल रिकॉर्ड्स: {len(all_reg)}")
-            st.dataframe(pd.DataFrame(all_reg))
-        else:
-            st.warning("रजिस्टर खाली है।")
+        if all_reg: st.dataframe(pd.DataFrame(all_reg))
 
 else:
-    st.info("Side menu में पासवर्ड डालें। (Default: sgam@4321)")
+    st.info("Side menu में पासवर्ड डालें।")
