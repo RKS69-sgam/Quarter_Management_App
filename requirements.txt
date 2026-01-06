@@ -3,3 +3,6 @@ pandas
 firebase-admin
 python-docx
 python-dateutil
+openpyxl
+
+
