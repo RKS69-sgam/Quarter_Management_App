@@ -100,6 +100,7 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                 ctx = {
                     "EmployeeName": r['Employee Name in Hindi'],
                     "Designation": r['Designation in Hindi'],
+                    "ShortName": short_name,
                     "Unit": unit_2digit,
                     "PFNumber": str(r['PF No.']).strip(),
                     "FromDate": f_dt.strftime('%d-%m-%Y'),
@@ -134,6 +135,7 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                     ctx = {
                         "EmployeeName": r_sf['Employee Name in Hindi'],
                         "Designation": r_sf['Designation in Hindi'],
+                        "ShortName": short_name,
                         "Unit": unit_2digit,
                         "PFNumber": str(r_sf['PF No.']).strip(),
                         "LetterDate": date.today().strftime('%d-%m-%Y'),
@@ -196,3 +198,4 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
 
 else:
     st.info("Side menu में पासवर्ड डालें।")
+
