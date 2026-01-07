@@ -20,6 +20,13 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
+# --- NEW: DATA CACHING (ऐप को हैंग होने से बचाने के लिए) ---
+@st.cache_data(ttl=600)  # 10 मिनट के लिए डेटा सेव रहेगा
+def get_employee_data():
+    emp_stream = db.collection('employees').stream()
+    data = [d.to_dict() for d in emp_stream]
+    return pd.DataFrame(data) if data else pd.DataFrame()
+
 # --- 2. DOCUMENT ENGINE ---
 def safe_replace(paragraph, context):
     inline = paragraph.runs
@@ -39,28 +46,38 @@ def generate_doc(template_name, context):
     if not os.path.exists(path):
         st.error(f"Template not found: {path}")
         return None
-    doc = Document(path)
-    for p in doc.paragraphs: safe_replace(p, context)
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs: safe_replace(p, context)
-    bio = io.BytesIO()
-    doc.save(bio)
-    bio.seek(0)
-    return bio
+    try:
+        doc = Document(path)
+        for p in doc.paragraphs: safe_replace(p, context)
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for p in cell.paragraphs: safe_replace(p, context)
+        bio = io.BytesIO()
+        doc.save(bio)
+        bio.seek(0)
+        return bio
+    except Exception as e:
+        st.error(f"Error processing doc: {e}")
+        return None
 
 # --- 3. MAIN INTERFACE ---
 st.set_page_config(page_title="Railway Admin Pro", layout="wide")
 
-if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWORD", "sgam@4321"):
+# पासवर्ड प्रोटेक्शन
+pwd = st.sidebar.text_input("Password", type="password")
+if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
     
-    # मास्टर कर्मचारी डेटा लोड करें
-    emp_stream = db.collection('employees').stream()
-    emp_list = [d.to_dict() for d in emp_stream]
-    emp_df = pd.DataFrame(emp_list) if emp_list else pd.DataFrame()
+    # डेटा केवल एक बार लोड होगा
+    with st.spinner("Loading Database..."):
+        emp_df = get_employee_data()
 
     tab = st.sidebar.radio("Navigation", ["Absent Case (Duty+SF11)", "Other SF-11/Order", "SF-11 Register & Import"])
+    
+    # बटन जो कैश साफ़ कर दे (अगर नया डेटा देखना हो)
+    if st.sidebar.button("🔄 Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
 
     LEGAL_ENDING = " जो कि रेल सेवक होने के नाते आपकी रेल सेवा निष्ठा के प्रति घोर लापरवाही को प्रदर्शित करता है। अतः आप कामों व भूलो के फेहरिस्त धारा 1, 2 एवं 3 के उल्लंघन के दोषी पाए जाते है।"
 
@@ -77,12 +94,7 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
             t_dt = c2.date_input("अनुपस्थिति तक")
             
             if st.button("Generate Documents & Save"):
-                memo_main = f"आप दिनांक {f_dt.strftime('%d-%m-%Y')} से {t_dt.strftime('%d-%m-%Y')} तक बिना किसी पूर्व सूचना के अपने कार्य से अनुपस्थित रहे,"
-                full_memo = memo_main + LEGAL_ENDING
-                
-                # Unit Column से डेटा निकालें
                 unit_val = str(r.get('Unit', ''))[:2]
-                
                 ctx = {
                     "EmployeeName": r['Employee Name in Hindi'],
                     "Designation": r['Designation in Hindi'],
@@ -93,26 +105,23 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
                     "DutyDate": (t_dt + timedelta(days=1)).strftime('%d-%m-%Y'),
                     "LetterDate": date.today().strftime('%d-%m-%Y'),
                     "LetterNo": f"SGAM/SF-11/{r['PF No.']}",
-                    "Memo": full_memo
+                    "Memo": f"आप दिनांक {f_dt.strftime('%d-%m-%Y')} से {t_dt.strftime('%d-%m-%Y')} तक बिना सूचना अनुपस्थित रहे," + LEGAL_ENDING
                 }
                 d_doc = generate_doc("Absent Duty letter temp", ctx)
                 s_doc = generate_doc("SF-11 temp", ctx)
-                if d_doc: st.download_button("⬇️ Duty Letter", d_doc, f"Duty_{ctx['PFNumber']}.docx")
-                if s_doc: st.download_button("⬇️ SF-11", s_doc, f"SF11_{ctx['PFNumber']}.docx")
+                if d_doc: st.download_button("⬇️ Download Duty Letter", d_doc, f"Duty_{ctx['PFNumber']}.docx")
+                if s_doc: st.download_button("⬇️ Download SF-11", s_doc, f"SF11_{ctx['PFNumber']}.docx")
                 db.collection("sf11_register").add({**ctx, "status": "Issued", "timestamp": datetime.now()})
 
-    # --- TAB 2: OTHER SF-11 & ORDER ---
+    # --- TAB 2: OTHER SF-11 ---
     elif tab == "Other SF-11/Order":
         mode = st.radio("प्रकार", ["नया SF-11 जारी करें", "दण्‍डादेश (Punishment Order)"])
         
         if mode == "दण्‍डादेश (Punishment Order)":
             st.subheader("🔨 दण्‍डादेश (NIP) जनरेट")
-            docs = db.collection("sf11_register").stream()
-            reg_list = []
-            for d in docs:
-                item = d.to_dict(); item['doc_id'] = d.id
-                if not item.get('OrderNo') or str(item.get('OrderNo')) == "":
-                    reg_list.append(item)
+            # यहाँ भी Caching या Limited Stream का उपयोग करना बेहतर है
+            docs = db.collection("sf11_register").where("status", "==", "Issued").stream()
+            reg_list = [d.to_dict() | {"doc_id": d.id} for d in docs]
             
             if reg_list:
                 reg_df = pd.DataFrame(reg_list)
@@ -120,7 +129,7 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
                 sel_text = st.selectbox("केस चुनें", reg_df['Select_Disp'].unique())
                 case = reg_df[reg_df['Select_Disp'] == sel_text].iloc[0]
                 
-                # Unit Extraction from employees collection
+                # Unit Extraction
                 unit_extracted = ""
                 if not emp_df.empty:
                     match = emp_df[emp_df['PF No.'].astype(str).str.strip() == str(case['PFNumber']).strip()]
@@ -132,13 +141,12 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
                 order_date = c2.date_input("दण्‍डादेश दिनांक", value=date.today())
                 
                 punishment_text = st.selectbox("दण्ड का विवरण", [
-                    "आगामी देय एक वर्ष की वेतन वृद्धि असंचयी प्रभाव से रोके जाने के अर्थदंड से दंडित किया जाता है।",
-                    "आगामी देय एक वर्ष की वेतन वृद्धि संचयी प्रभाव से रोके जाने के अर्थदंड से दंडित किया जाता है।",
-                    "आगामी देय एक सेट सुविधा पास तत्काल प्रभाव से रोके जाने के दंड से दंडित किया जाता है।"
+                    "आगामी देय एक वर्ष की वेतन वृद्धि असंचयी प्रभाव से रोके जाने...",
+                    "आगामी देय एक वर्ष की वेतन वृद्धि संचयी प्रभाव से रोके जाने...",
+                    "आगामी देय एक सेट सुविधा पास तत्काल प्रभाव से रोके जाने..."
                 ])
 
-                if st.button("Generate & Update Database"):
-                    # Mapping logic as requested
+                if st.button("Generate & Update"):
                     ctx = {
                         "EmployeeName": case.get('EmployeeName', ''),
                         "Designation": case.get('Designation', ''),
@@ -146,8 +154,7 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
                         "Dandadesh": dandadesh_no,
                         "LetterNo.": case.get('LetterNo', ''),
                         "SF-11Date": case.get('LetterDate', ''),
-                        "LetterDate": order_date.strftime('%d-%m-%Y'), # [LetterDate] me Order Date
-                        "OrderDate": order_date.strftime('%d-%m-%Y'),
+                        "LetterDate": order_date.strftime('%d-%m-%Y'),
                         "Memo": punishment_text
                     }
                     doc_bio = generate_doc("SF-11 Punishment order temp", ctx)
@@ -156,15 +163,17 @@ if st.sidebar.text_input("Password", type="password") == st.secrets.get("PASSWOR
                             "OrderNo": dandadesh_no, "OrderDate": order_date.strftime('%d-%m-%Y'),
                             "PunishmentDetails": punishment_text, "status": "Closed"
                         })
-                        st.success(f"NIP तैयार! Unit: {unit_extracted}")
                         st.download_button("⬇️ Download NIP", doc_bio, f"NIP_{case['PFNumber']}.docx")
             else: st.warning("कोई पेंडिंग केस नहीं मिला।")
 
     # --- TAB 3: REGISTER ---
     elif tab == "SF-11 Register & Import":
         st.subheader("📊 रजिस्टर")
-        all_reg = [d.to_dict() for d in db.collection("sf11_register").stream()]
-        if all_reg: st.dataframe(pd.DataFrame(all_reg))
+        if st.button("Load Register Data"):
+            all_reg = [d.to_dict() for d in db.collection("sf11_register").limit(100).stream()]
+            if all_reg: st.dataframe(pd.DataFrame(all_reg))
 
+elif pwd != "":
+    st.error("Wrong Password")
 else:
     st.info("Side menu में पासवर्ड डालें।")
