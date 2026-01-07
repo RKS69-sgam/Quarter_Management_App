@@ -20,7 +20,7 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-# --- 2. DATA CACHING (ऐप को तेज चलाने के लिए) ---
+# --- 2. DATA CACHING (Performance Optimization) ---
 @st.cache_data(ttl=600)
 def get_employee_data():
     emp_stream = db.collection('employees').stream()
@@ -58,7 +58,7 @@ def generate_doc(template_name, context):
         bio.seek(0)
         return bio
     except Exception as e:
-        st.error(f"Error processing doc: {e}")
+        st.error(f"Doc Error: {e}")
         return None
 
 # --- 4. MAIN INTERFACE ---
@@ -70,12 +70,11 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
     with st.spinner("Loading Database..."):
         emp_df = get_employee_data()
         if not emp_df.empty:
-            # Dropdown Display Column बनाना
             emp_df['Full_Disp'] = emp_df['PF No.'].astype(str) + " - " + emp_df['Employee Name in Hindi'].astype(str)
 
     tab = st.sidebar.radio("Navigation", ["Absent Case (Duty+SF11)", "Other SF-11/Order", "SF-11 Register & Import"])
     
-    if st.sidebar.button("🔄 Refresh Employee Data"):
+    if st.sidebar.button("🔄 Refresh Data"):
         st.cache_data.clear()
         st.rerun()
 
@@ -92,25 +91,28 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
             f_dt = c1.date_input("अनुपस्थिति से")
             t_dt = c2.date_input("अनुपस्थिति तक")
             
-            if st.button("Generate Documents & Save"):
+            if st.button("Generate Documents"):
                 unit_2digit = str(r.get('Unit', ''))[:2]
+                short_name = str(r.get('SF-11 short name', '')).strip()
+                # सं/No./स्‍टॉफ/मानक फॉर्म/[ShortName]/[Unit]
+                new_letter_no = f"सं/No./स्‍टॉफ/मानक फॉर्म/{short_name}/{unit_2digit}"
+                
                 ctx = {
                     "EmployeeName": r['Employee Name in Hindi'],
                     "Designation": r['Designation in Hindi'],
-                    "ShortName": r['SF-11 short name'],
                     "Unit": unit_2digit,
                     "PFNumber": str(r['PF No.']).strip(),
                     "FromDate": f_dt.strftime('%d-%m-%Y'),
                     "ToDate": t_dt.strftime('%d-%m-%Y'),
                     "DutyDate": (t_dt + timedelta(days=1)).strftime('%d-%m-%Y'),
                     "LetterDate": date.today().strftime('%d-%m-%Y'),
-                    "LetterNo": f"सं/No./स्‍टॉफ/मानक फॉर्म/{r['PF No.']}",
-                    "Memo": f"आप दिनांक {f_dt.strftime('%d-%m-%Y')} से {t_dt.strftime('%d-%m-%Y')} तक बिना किसी पूर्व सूचना के अपने कार्य से अनुपस्थित रहे," + LEGAL_ENDING
+                    "LetterNo": new_letter_no,
+                    "Memo": f"आप दिनांक {f_dt.strftime('%d-%m-%Y')} से {t_dt.strftime('%d-%m-%Y')} तक बिना सूचना अनुपस्थित रहे," + LEGAL_ENDING
                 }
                 d_doc = generate_doc("Absent Duty letter temp", ctx)
                 s_doc = generate_doc("SF-11 temp", ctx)
-                if d_doc: st.download_button("⬇️ Duty Letter", d_doc, f"Duty_{ctx['EmployeeName']}.docx")
-                if s_doc: st.download_button("⬇️ SF-11", s_doc, f"SF11_{ctx['EmployeeName']}.docx")
+                if d_doc: st.download_button("⬇️ Duty Letter", d_doc, f"Duty_{ctx['PFNumber']}.docx")
+                if s_doc: st.download_button("⬇️ SF-11", s_doc, f"SF11_{ctx['PFNumber']}.docx")
                 db.collection("sf11_register").add({**ctx, "status": "Issued", "timestamp": datetime.now()})
 
     # --- TAB 2: OTHER SF-11 & ORDER ---
@@ -122,10 +124,13 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
             if not emp_df.empty:
                 sel_emp_sf = st.selectbox("कर्मचारी चुनें", emp_df['Full_Disp'].unique())
                 r_sf = emp_df[emp_df['Full_Disp'] == sel_emp_sf].iloc[0]
-                user_memo = st.text_area("आरोप का विवरण लिखें")
+                user_memo = st.text_area("आरोप का विवरण")
                 
                 if st.button("Generate SF-11"):
                     unit_2digit = str(r_sf.get('Unit', ''))[:2]
+                    short_name = str(r_sf.get('SF-11 short name', '')).strip()
+                    new_letter_no = f"सं/No./स्‍टॉफ/मानक फॉर्म/{short_name}/{unit_2digit}"
+                    
                     ctx = {
                         "EmployeeName": r_sf['Employee Name in Hindi'],
                         "Designation": r_sf['Designation in Hindi'],
@@ -133,7 +138,7 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                         "PFNumber": str(r_sf['PF No.']).strip(),
                         "LetterDate": date.today().strftime('%d-%m-%Y'),
                         "Memo": user_memo + LEGAL_ENDING,
-                        "LetterNo": f"सं/No./स्‍टॉफ/मानक फॉर्म/{r['PF No.']}"
+                        "LetterNo": new_letter_no
                     }
                     doc = generate_doc("SF-11 temp", ctx)
                     if doc:
@@ -147,11 +152,9 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
             
             if reg_list:
                 reg_df = pd.DataFrame(reg_list)
-                reg_df['Select_Disp'] = reg_df['PFNumber'].astype(str) + " - " + reg_df['EmployeeName'] + " - SF11 Dt: " + reg_df['LetterDate']
-                sel_case = st.selectbox("केस चुनें", reg_df['Select_Disp'].unique())
-                case = reg_df[reg_df['Select_Disp'] == sel_case].iloc[0]
+                reg_df['Select_Disp'] = reg_df['PFNumber'].astype(str) + " - " + reg_df['EmployeeName'] + " - Dt: " + reg_df['LetterDate']
+                case = reg_df[reg_df['Select_Disp'] == st.selectbox("केस चुनें", reg_df['Select_Disp'].unique())].iloc[0]
                 
-                # Unit Extraction from master data
                 unit_extracted = ""
                 if not emp_df.empty:
                     match = emp_df[emp_df['PF No.'].astype(str).str.strip() == str(case['PFNumber']).strip()]
@@ -161,15 +164,9 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                 c1, c2 = st.columns(2)
                 dandadesh_no = c1.text_input("दण्‍डादेश क्रमांक", value=f"SGAM/NIP/{case['PFNumber']}")
                 order_date = c2.date_input("दण्‍डादेश दिनांक", value=date.today())
-                
-                punishment_text = st.selectbox("दण्ड का विवरण", [
-                    "आगामी देय एक वर्ष की वेतन वृद्धि असंचयी प्रभाव से रोके जाने के अर्थदंड से दंडित किया जाता है।",
-                    "आगामी देय एक वर्ष की वेतन वृद्धि संचयी प्रभाव से रोके जाने के अर्थदंड से दंडित किया जाता है।",
-                    "आगामी देय एक सेट सुविधा पास तत्काल प्रभाव से रोके जाने के दंड से दंडित किया जाता है।",
-                    "आगामी देय एक सेट PTO तत्काल प्रभाव से रोके जाने के दंड से दंडित किया जाता है।"
-                ])
+                punishment_text = st.selectbox("दण्ड चुनें", ["आगामी देय एक वर्ष की वेतन वृद्धि असंचयी...", "आगामी देय एक वर्ष की वेतन वृद्धि संचयी...", "आगामी देय एक सेट सुविधा पास..."])
 
-                if st.button("Generate & Update Database"):
+                if st.button("Generate & Update"):
                     ctx = {
                         "EmployeeName": case.get('EmployeeName', ''),
                         "Designation": case.get('Designation', ''),
@@ -177,7 +174,7 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                         "Dandadesh": dandadesh_no,
                         "LetterNo.": case.get('LetterNo', ''),
                         "SF-11Date": case.get('LetterDate', ''),
-                        "LetterDate": order_date.strftime('%d-%m-%Y'), # LetterDate में Order Date
+                        "LetterDate": order_date.strftime('%d-%m-%Y'), # Order Date
                         "OrderDate": order_date.strftime('%d-%m-%Y'),
                         "Memo": punishment_text
                     }
@@ -185,23 +182,17 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                     if doc_bio:
                         db.collection("sf11_register").document(case['doc_id']).update({
                             "OrderNo": dandadesh_no, "OrderDate": order_date.strftime('%d-%m-%Y'),
-                            "PunishmentDetails": punishment_text, "status": "Closed"
+                            "status": "Closed"
                         })
-                        st.success(f"NIP तैयार! Unit: {unit_extracted}")
                         st.download_button("⬇️ Download NIP", doc_bio, f"NIP_{case['PFNumber']}.docx")
             else: st.warning("कोई पेंडिंग केस नहीं मिला।")
 
     # --- TAB 3: REGISTER ---
     elif tab == "SF-11 Register & Import":
         st.subheader("📊 रजिस्टर")
-        if st.button("Show All Issued Records"):
+        if st.button("Load Records"):
             all_reg = [d.to_dict() for d in db.collection("sf11_register").limit(100).stream()]
             if all_reg: st.dataframe(pd.DataFrame(all_reg))
 
-elif pwd != "":
-    st.error("Wrong Password")
 else:
     st.info("Side menu में पासवर्ड डालें।")
-
-
-
