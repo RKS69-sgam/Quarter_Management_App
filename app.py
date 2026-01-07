@@ -249,7 +249,7 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
             st.subheader("📊 रजिस्टर")
             if st.button("Load All Records"):
                 # order_by हटा दिया गया है ताकि बिना timestamp वाले पुराने रिकॉर्ड भी दिखें
-                all_reg = [d.to_dict() for d in db.collection("sf11_register").limit(500).stream()]
+                all_reg = [d.to_dict() for d in db.collection("sf11_register").limit(100).stream()]
                 
                 if all_reg:
                     df_final = pd.DataFrame(all_reg)
@@ -265,4 +265,5 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
 
 else:
     st.info("Side menu में पासवर्ड डालें।")
+
 
