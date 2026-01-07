@@ -183,7 +183,7 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                     doc_bio = generate_doc("SF-11 Punishment order temp", ctx)
                     if doc_bio:
                         db.collection("sf11_register").document(case['doc_id']).update({
-                            "OrderNo": dandadesh_no, "OrderDate": order_date.strftime('%d-%m-%Y'),
+                            "OrderNo": dandadesh_no, "Punishment": punishment_text, "OrderDate": order_date.strftime('%d-%m-%Y'),
                             "status": "Closed"
                         })
                         st.download_button("⬇️ Download NIP", doc_bio, f"NIP_{case['PFNumber']}.docx")
@@ -198,5 +198,6 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
 
 else:
     st.info("Side menu में पासवर्ड डालें।")
+
 
 
