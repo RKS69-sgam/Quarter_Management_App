@@ -104,7 +104,7 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                     "ToDate": t_dt.strftime('%d-%m-%Y'),
                     "DutyDate": (t_dt + timedelta(days=1)).strftime('%d-%m-%Y'),
                     "LetterDate": date.today().strftime('%d-%m-%Y'),
-                    "LetterNo": f"सं/No./स्‍टॉफ/मानक फॉर्म/{r['SF-11 short name']}",
+                    "LetterNo": f"सं/No./स्‍टॉफ/मानक फॉर्म/{r['PF No.']}",
                     "Memo": f"आप दिनांक {f_dt.strftime('%d-%m-%Y')} से {t_dt.strftime('%d-%m-%Y')} तक बिना किसी पूर्व सूचना के अपने कार्य से अनुपस्थित रहे," + LEGAL_ENDING
                 }
                 d_doc = generate_doc("Absent Duty letter temp", ctx)
@@ -133,7 +133,7 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                         "PFNumber": str(r_sf['PF No.']).strip(),
                         "LetterDate": date.today().strftime('%d-%m-%Y'),
                         "Memo": user_memo + LEGAL_ENDING,
-                        "LetterNo": f"सं/No./स्‍टॉफ/मानक फॉर्म/{r['SF-11 short name']}"
+                        "LetterNo": f"सं/No./स्‍टॉफ/मानक फॉर्म/{r['PF No.']}"
                     }
                     doc = generate_doc("SF-11 temp", ctx)
                     if doc:
@@ -202,5 +202,6 @@ elif pwd != "":
     st.error("Wrong Password")
 else:
     st.info("Side menu में पासवर्ड डालें।")
+
 
 
