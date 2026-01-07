@@ -244,26 +244,41 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                     st.success("अपील सफलतापूर्वक 'Appeal-Closed' कर दी गई है।")
             else: st.info("अपील प्रक्रिया (Appeal-Process) में कोई केस नहीं है।")
 
-        # --- TAB 4: REGISTER (Fixed for missing timestamps) ---
+        # --- TAB 4: REGISTER (Fully Fail-Safe Version) ---
         elif tab == "SF-11 Register & Import":
-            st.subheader("📊 रजिस्टर")
+            st.subheader("📊 रजिस्टर (Master Register)")
+        
+            # Ek refresh button data load karne ke liye
             if st.button("Load All Records"):
-                # order_by हटा दिया गया है ताकि बिना timestamp वाले पुराने रिकॉर्ड भी दिखें
-                all_reg = [d.to_dict() for d in db.collection("sf11_register").limit(100).stream()]
-                
-                if all_reg:
-                    df_final = pd.DataFrame(all_reg)
-                
-                    # अगर timestamp है तो उसके आधार पर सॉर्टिंग Python (Pandas) में करेंगे 
-                    # ताकि ऐप क्रैश न हो और पुराने रिकॉर्ड भी सुरक्षित रहें
-                    if 'timestamp' in df_final.columns:
-                        df_final = df_final.sort_values(by='timestamp', ascending=False, na_position='last')
+                with st.spinner("Fetching data..."):
+                    try:
+                        # Bina kisi filter ya order_by ke simple fetch
+                        all_docs = db.collection("sf11_register").get()
+                        all_reg = [d.to_dict() for d in all_docs]
                     
-                    st.dataframe(df_final)
-                else:
-                    st.warning("रजिस्टर में कोई डेटा नहीं मिला।")
+                        if all_reg:
+                            df_final = pd.DataFrame(all_reg)
+                        
+                            # Timestamp column check aur Sorting
+                            if 'timestamp' in df_final.columns:
+                                # Timestamp ko datetime format mein convert karein taaki sorting sahi ho
+                                df_final['timestamp'] = pd.to_datetime(df_final['timestamp'], errors='coerce')
+                                df_final = df_final.sort_values(by='timestamp', ascending=False)
+                        
+                            # Dataframe ko screen par dikhana
+                            st.dataframe(df_final, use_container_width=True)
+                        
+                            # Download option (CSV) agar aapko excel mein chahiye
+                            csv = df_final.to_csv(index=False).encode('utf-8-sig')
+                            st.download_button("💾 Download Register as CSV", csv, "SF11_Register.csv", "text/csv")
+                        
+                        else:
+                            st.warning("रजिस्टर में कोई डेटा (Documents) नहीं मिला।")
+                    except Exception as e:
+                        st.error(f"Data load karne mein samasya aayi: {e}")
 
 else:
     st.info("Side menu में पासवर्ड डालें।")
+
 
 
