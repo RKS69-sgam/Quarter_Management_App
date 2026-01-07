@@ -20,7 +20,7 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-# --- 2. DATA CACHING (Performance Optimization) ---
+# --- 2. DATA CACHING ---
 @st.cache_data(ttl=600)
 def get_employee_data():
     emp_stream = db.collection('employees').stream()
@@ -72,7 +72,7 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
         if not emp_df.empty:
             emp_df['Full_Disp'] = emp_df['PF No.'].astype(str) + " - " + emp_df['Employee Name in Hindi'].astype(str)
 
-    tab = st.sidebar.radio("Navigation", ["Absent Case (Duty+SF11)", "Other SF-11/Order", "SF-11 Register & Import"])
+    tab = st.sidebar.radio("Navigation", ["Absent Case (Duty+SF11)", "Other SF-11/Order", "Appeal Process", "SF-11 Register & Import"])
     
     if st.sidebar.button("🔄 Refresh Data"):
         st.cache_data.clear()
@@ -94,7 +94,6 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
             if st.button("Generate Documents"):
                 unit_2digit = str(r.get('Unit', ''))[:2]
                 short_name = str(r.get('SF-11 short name', '')).strip()
-                # सं/No./स्‍टॉफ/मानक फॉर्म/[ShortName]/[Unit]
                 new_letter_no = f"सं/No./स्‍टॉफ/मानक फॉर्म/{short_name}/{unit_2digit}"
                 
                 ctx = {
@@ -176,7 +175,7 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                         "Dandadesh": dandadesh_no,
                         "LetterNo.": case.get('LetterNo', ''),
                         "SF-11Date": case.get('LetterDate', ''),
-                        "LetterDate": order_date.strftime('%d-%m-%Y'), # Order Date
+                        "LetterDate": order_date.strftime('%d-%m-%Y'),
                         "OrderDate": order_date.strftime('%d-%m-%Y'),
                         "Memo": punishment_text
                     }
@@ -189,16 +188,68 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                         st.download_button("⬇️ Download NIP", doc_bio, f"NIP_{case['PFNumber']}.docx")
             else: st.warning("कोई पेंडिंग केस नहीं मिला।")
 
-    # --- TAB 3: REGISTER ---
+    # --- TAB 3: APPEAL PROCESS ---
+    elif tab == "Appeal Process":
+        st.subheader("⚖️ अपील प्रबंधन (Appeal Management)")
+        appeal_mode = st.radio("चुनें", ["1. अपील दर्ज करें (Generate Appeal Letter)", "2. अपील निर्णय (Final Order & Close)"])
+
+        if appeal_mode == "1. अपील दर्ज करें (Generate Appeal Letter)":
+            docs = db.collection("sf11_register").where("status", "==", "Closed").stream()
+            closed_list = [d.to_dict() | {"doc_id": d.id} for d in docs]
+            if closed_list:
+                df_c = pd.DataFrame(closed_list)
+                df_c['Select_Disp'] = df_c['PFNumber'].astype(str) + " - " + df_c['EmployeeName']
+                sel = st.selectbox("अपील हेतु केस चुनें", df_c['Select_Disp'].unique())
+                case = df_c[df_c['Select_Disp'] == sel].iloc[0]
+                
+                app_date = st.date_input("अपील प्राप्ति दिनांक")
+                if st.button("Generate Appeal Letter & Process"):
+                    ctx = {
+                        "EmployeeName": case.get('EmployeeName', ''),
+                        "Designation": case.get('Designation', ''),
+                        "Unit": case.get('Unit', ''),
+                        "PFNumber": case.get('PFNumber', ''),
+                        "OrderNo": case.get('OrderNo', ''),
+                        "OrderDate": case.get('OrderDate', ''),
+                        "AppealDate": app_date.strftime('%d-%m-%Y')
+                    }
+                    doc = generate_doc("apeal_letter_temp", ctx)
+                    if doc:
+                        db.collection("sf11_register").document(case['doc_id']).update({
+                            "AppealDate": app_date.strftime('%d-%m-%Y'),
+                            "status": "Appeal-Process"
+                        })
+                        st.success("स्टेटस 'Appeal-Process' अपडेट किया गया।")
+                        st.download_button("⬇️ Download Appeal Letter", doc, f"Appeal_{case['PFNumber']}.docx")
+            else: st.info("अपील के लिए कोई 'Closed' केस नहीं मिला।")
+
+        elif appeal_mode == "2. अपील निर्णय (Final Order & Close)":
+            docs = db.collection("sf11_register").where("status", "==", "Appeal-Process").stream()
+            proc_list = [d.to_dict() | {"doc_id": d.id} for d in docs]
+            if proc_list:
+                df_p = pd.DataFrame(proc_list)
+                df_p['Select_Disp'] = df_p['PFNumber'].astype(str) + " - " + df_p['EmployeeName']
+                sel = st.selectbox("निर्णय हेतु केस चुनें", df_p['Select_Disp'].unique())
+                case = df_p[df_p['Select_Disp'] == sel].iloc[0]
+                
+                decision_date = st.date_input("निर्णय दिनांक")
+                decision_desc = st.selectbox("अपील निर्णय", ["दण्ड यथावत रखा गया", "दण्ड कम किया गया", "दण्ड रद्द किया गया", "चेतावनी देकर छोड़ दिया गया"])
+                
+                if st.button("Finalize Appeal & Close"):
+                    db.collection("sf11_register").document(case['doc_id']).update({
+                        "AppealDecisionDate": decision_date.strftime('%d-%m-%Y'),
+                        "AppealDecision": decision_desc,
+                        "status": "Appeal-Closed"
+                    })
+                    st.success("अपील सफलतापूर्वक 'Appeal-Closed' कर दी गई है।")
+            else: st.info("अपील प्रक्रिया (Appeal-Process) में कोई केस नहीं है।")
+
+    # --- TAB 4: REGISTER ---
     elif tab == "SF-11 Register & Import":
         st.subheader("📊 रजिस्टर")
         if st.button("Load Records"):
-            all_reg = [d.to_dict() for d in db.collection("sf11_register").limit(100).stream()]
+            all_reg = [d.to_dict() for d in db.collection("sf11_register").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(100).stream()]
             if all_reg: st.dataframe(pd.DataFrame(all_reg))
 
 else:
     st.info("Side menu में पासवर्ड डालें।")
-
-
-
-
