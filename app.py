@@ -244,12 +244,25 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                     st.success("अपील सफलतापूर्वक 'Appeal-Closed' कर दी गई है।")
             else: st.info("अपील प्रक्रिया (Appeal-Process) में कोई केस नहीं है।")
 
-    # --- TAB 4: REGISTER ---
-    elif tab == "SF-11 Register & Import":
-        st.subheader("📊 रजिस्टर")
-        if st.button("Load Records"):
-            all_reg = [d.to_dict() for d in db.collection("sf11_register").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(100).stream()]
-            if all_reg: st.dataframe(pd.DataFrame(all_reg))
+        # --- TAB 4: REGISTER (Fixed for missing timestamps) ---
+        elif tab == "SF-11 Register & Import":
+            st.subheader("📊 रजिस्टर")
+            if st.button("Load All Records"):
+                # order_by हटा दिया गया है ताकि बिना timestamp वाले पुराने रिकॉर्ड भी दिखें
+                all_reg = [d.to_dict() for d in db.collection("sf11_register").limit(500).stream()]
+                
+                if all_reg:
+                    df_final = pd.DataFrame(all_reg)
+                
+                    # अगर timestamp है तो उसके आधार पर सॉर्टिंग Python (Pandas) में करेंगे 
+                    # ताकि ऐप क्रैश न हो और पुराने रिकॉर्ड भी सुरक्षित रहें
+                    if 'timestamp' in df_final.columns:
+                        df_final = df_final.sort_values(by='timestamp', ascending=False, na_position='last')
+                    
+                    st.dataframe(df_final)
+                else:
+                    st.warning("रजिस्टर में कोई डेटा नहीं मिला।")
 
 else:
     st.info("Side menu में पासवर्ड डालें।")
+
