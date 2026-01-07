@@ -97,19 +97,20 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                 ctx = {
                     "EmployeeName": r['Employee Name in Hindi'],
                     "Designation": r['Designation in Hindi'],
+                    "ShortName": r['SF-11 short name'],
                     "Unit": unit_2digit,
                     "PFNumber": str(r['PF No.']).strip(),
                     "FromDate": f_dt.strftime('%d-%m-%Y'),
                     "ToDate": t_dt.strftime('%d-%m-%Y'),
                     "DutyDate": (t_dt + timedelta(days=1)).strftime('%d-%m-%Y'),
                     "LetterDate": date.today().strftime('%d-%m-%Y'),
-                    "LetterNo": f"SGAM/SF-11/{r['PF No.']}",
+                    "LetterNo": f"सं/No./स्‍टॉफ/मानक फॉर्म/{r['SF-11 short name']}/{unit_2digit}",
                     "Memo": f"आप दिनांक {f_dt.strftime('%d-%m-%Y')} से {t_dt.strftime('%d-%m-%Y')} तक बिना किसी पूर्व सूचना के अपने कार्य से अनुपस्थित रहे," + LEGAL_ENDING
                 }
                 d_doc = generate_doc("Absent Duty letter temp", ctx)
                 s_doc = generate_doc("SF-11 temp", ctx)
-                if d_doc: st.download_button("⬇️ Duty Letter", d_doc, f"Duty_{ctx['PFNumber']}.docx")
-                if s_doc: st.download_button("⬇️ SF-11", s_doc, f"SF11_{ctx['PFNumber']}.docx")
+                if d_doc: st.download_button("⬇️ Duty Letter", d_doc, f"Duty_{ctx['EmployeeName']}.docx")
+                if s_doc: st.download_button("⬇️ SF-11", s_doc, f"SF11_{ctx['EmployeeName']}.docx")
                 db.collection("sf11_register").add({**ctx, "status": "Issued", "timestamp": datetime.now()})
 
     # --- TAB 2: OTHER SF-11 & ORDER ---
@@ -132,7 +133,7 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                         "PFNumber": str(r_sf['PF No.']).strip(),
                         "LetterDate": date.today().strftime('%d-%m-%Y'),
                         "Memo": user_memo + LEGAL_ENDING,
-                        "LetterNo": f"SGAM/SF-11/OTH/{r_sf['PF No.']}"
+                        "LetterNo": f"सं/No./स्‍टॉफ/मानक फॉर्म/{r['SF-11 short name']}/{unit_2digit}"
                     }
                     doc = generate_doc("SF-11 temp", ctx)
                     if doc:
@@ -164,7 +165,8 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                 punishment_text = st.selectbox("दण्ड का विवरण", [
                     "आगामी देय एक वर्ष की वेतन वृद्धि असंचयी प्रभाव से रोके जाने के अर्थदंड से दंडित किया जाता है।",
                     "आगामी देय एक वर्ष की वेतन वृद्धि संचयी प्रभाव से रोके जाने के अर्थदंड से दंडित किया जाता है।",
-                    "आगामी देय एक सेट सुविधा पास तत्काल प्रभाव से रोके जाने के दंड से दंडित किया जाता है।"
+                    "आगामी देय एक सेट सुविधा पास तत्काल प्रभाव से रोके जाने के दंड से दंडित किया जाता है।",
+                    "आगामी देय एक सेट PTO तत्काल प्रभाव से रोके जाने के दंड से दंडित किया जाता है।"
                 ])
 
                 if st.button("Generate & Update Database"):
@@ -200,3 +202,4 @@ elif pwd != "":
     st.error("Wrong Password")
 else:
     st.info("Side menu में पासवर्ड डालें।")
+
