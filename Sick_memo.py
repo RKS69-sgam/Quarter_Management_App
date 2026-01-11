@@ -10,8 +10,8 @@ from firebase_admin import credentials, firestore
 # =================================================================
 # --- 0. PATH & FIREBASE SETUP ---
 # =================================================================
-# Assets folder ka sahi path set karein
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Agar assets folder mein hai
 TEMPLATE_PATH = os.path.join(BASE_DIR, "assets", "SICK MEMO temp.docx")
 
 SICK_COLLECTION = "sickemp"
@@ -27,7 +27,6 @@ def init_db():
                     cred_dict['private_key'] = cred_dict['private_key'].replace('\\n', '\n')
                 cred = credentials.Certificate(cred_dict)
             else:
-                # Local testing ke liye (agar file root mein hai)
                 cred = credentials.Certificate('sgamoffice-firebase-adminsdk-fbsvc-253915b05b.json')
             firebase_admin.initialize_app(cred)
         except Exception as e:
@@ -48,22 +47,27 @@ def get_employees():
 def get_sick_records():
     docs = db.collection(SICK_COLLECTION).stream()
     data = [{**d.to_dict(), 'id': d.id} for d in docs]
-    return pd.DataFrame(data) if data else pd.DataFrame()
+    # Timestamp ke basis par sort karna (Naya record upar)
+    if data:
+        df = pd.DataFrame(data)
+        if 'Created' in df.columns:
+            df = df.sort_values(by='Created', ascending=False)
+        return df
+    return pd.DataFrame()
 
 def generate_docx(template_path, data):
     if not os.path.exists(template_path):
-        st.error(f"Error: Template file nahi mili is path par: {template_path}")
+        st.error(f"Template file not found at: {template_path}")
         return None
     try:
         doc = Document(template_path)
-        # Paragraphs mein placeholder replace karein
+        # Placeholder replacing logic
         for p in doc.paragraphs:
             for key, value in data.items():
                 target = f"[{key}]"
                 if target in p.text:
                     p.text = p.text.replace(target, str(value))
         
-        # Tables mein placeholder replace karein
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
@@ -76,20 +80,20 @@ def generate_docx(template_path, data):
         doc.save(bio)
         return bio.getvalue()
     except Exception as e:
-        st.error(f"Word file generate karne mein error: {e}")
+        st.error(f"Word file Error: {e}")
         return None
 
 # =================================================================
 # --- 2. AUTHENTICATION (Sgam@4321) ---
 # =================================================================
-st.set_page_config(layout="wide", page_title="Sick Management System")
+st.set_page_config(layout="wide", page_title="Railway Sick Management")
 
 if 'auth' not in st.session_state:
     st.session_state.auth = False
 
 if not st.session_state.auth:
-    st.title("🔒 Login")
-    with st.form("login_form"):
+    st.title("🔒 Sick Management Login")
+    with st.form("login"):
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
         if st.form_submit_button("Login"):
@@ -97,7 +101,7 @@ if not st.session_state.auth:
                 st.session_state.auth = True
                 st.rerun()
             else:
-                st.error("Galt Password!")
+                st.error("Invalid Credentials")
     st.stop()
 
 # =================================================================
@@ -105,25 +109,29 @@ if not st.session_state.auth:
 # =================================================================
 tab1, tab2 = st.tabs(["📝 Sick Memo Generate", "📊 Report & Return Update"])
 
-# --- TAB 1: GENERATE ---
+# --- TAB 1: GENERATE SICK MEMO ---
 with tab1:
     st.header("📋 Sick Memo Taiyar Karein")
     df_emp = get_employees()
     
     if not df_emp.empty:
-        # Selection Box
         emp_list = df_emp.apply(lambda r: f"{r.get('Employee Name')} ({r.get('HRMS ID')})", axis=1).tolist()
         selected = st.selectbox("Karmchari Chunein", emp_list)
         
         h_id = selected.split('(')[-1].strip(')')
         emp_data = df_emp[df_emp['HRMS ID'] == h_id].iloc[0]
-        
+
+        # Session state to handle file download outside the form
+        if 'memo_docx' not in st.session_state:
+            st.session_state.memo_docx = None
+        if 'current_h_id' not in st.session_state:
+            st.session_state.current_h_id = ""
+
         with st.form(key=f"memo_form_{h_id}"):
             c1, c2 = st.columns(2)
             memo_date = c1.date_input("Memo Date", value=datetime.now())
             hospital = c2.selectbox("Hospital", ["BEOHARI", "NEW KATNI", "OTHER"])
             
-            # Data Mapping for Template
             memo_data = {
                 "LetterDate": memo_date.strftime("%d/%m/%Y"),
                 "EmployeeName": emp_data.get('Employee Name', ''),
@@ -131,7 +139,7 @@ with tab1:
                 "UnitNumber": emp_data.get('UNIT No.', '')
             }
             
-            if st.form_submit_button("Generate & Firebase mein Save karein"):
+            if st.form_submit_button("Generate & Save Record"):
                 # 1. Firebase Logging
                 db.collection(SICK_COLLECTION).add({
                     "HRMS_ID": h_id,
@@ -147,38 +155,55 @@ with tab1:
                 # 2. Document Creation
                 docx_out = generate_docx(TEMPLATE_PATH, memo_data)
                 if docx_out:
-                    st.success("Data Save ho gaya!")
-                    st.download_button("📥 Download Sick Memo", docx_out, f"Sick_Memo_{h_id}.docx")
+                    st.session_state.memo_docx = docx_out
+                    st.session_state.current_h_id = h_id
+                    st.success("✅ Data Save ho gaya! Niche diye gaye button se download karein.")
+
+        # Download button placed OUTSIDE the form
+        if st.session_state.memo_docx and st.session_state.current_h_id == h_id:
+            st.download_button(
+                label="📥 Download Sick Memo (DOCX)",
+                data=st.session_state.memo_docx,
+                file_name=f"Sick_Memo_{h_id}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
     else:
         st.warning("Database mein koi karmchari nahi mila.")
 
-# --- TAB 2: REPORTS & RETURN ---
+# --- TAB 2: REPORTS & RETURN UPDATES ---
 with tab2:
-    st.header("📊 Sick Reports")
+    st.header("📊 Sick Reports & History")
     df_sick = get_sick_records()
     
     if not df_sick.empty:
-        # Return Update Section
-        st.subheader("🔄 Return Entry (Mark FIT)")
+        # Return Section
+        st.subheader("🔄 Update Return (Mark FIT)")
         active_sick = df_sick[df_sick['Status'] == 'SICK']
         
         if not active_sick.empty:
-            sick_names = active_sick.apply(lambda r: f"{r['Name']} (Sick: {r['SickDate']})", axis=1).tolist()
-            returning = st.selectbox("Kaun laut chuka hai?", sick_names)
-            ret_date = st.date_input("Return Date")
+            sick_options = active_sick.apply(lambda r: f"{r['Name']} (Sick: {r['SickDate']})", axis=1).tolist()
+            returning = st.selectbox("Kaun duty par laut chuka hai?", sick_options)
+            ret_date = st.date_input("Return (FIT) Date", value=datetime.now())
             
-            if st.button("Confirm Return"):
-                idx = sick_names.index(returning)
+            if st.button("Confirm Return & Mark FIT"):
+                idx = sick_options.index(returning)
                 doc_id = active_sick.iloc[idx]['id']
                 db.collection(SICK_COLLECTION).document(doc_id).update({
                     "Status": "FIT",
                     "ReturnDate": str(ret_date)
                 })
-                st.success("Status FIT kar diya gaya hai.")
+                st.success(f"Status Updated for {returning}")
                 st.rerun()
-        
+        else:
+            st.info("Abhi koi bhi karmchari SICK list mein nahi hai.")
+
         st.divider()
-        st.subheader("Sabhi Records")
-        st.dataframe(df_sick.drop(columns=['id', 'Created'], errors='ignore'), use_container_width=True)
+        st.subheader("📑 All Sick Records History")
+        # Cleaning display
+        disp_df = df_sick.drop(columns=['id', 'Created'], errors='ignore')
+        st.dataframe(disp_df, use_container_width=True)
+        
+        csv_report = disp_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+        st.download_button("📥 Download Full Report (CSV)", csv_report, "Sick_Report.csv", "text/csv")
     else:
-        st.info("Abhi tak koi sick record nahi hai.")
+        st.info("Abhi tak 'sickemp' collection mein koi data nahi hai.")
