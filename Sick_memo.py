@@ -7,7 +7,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 # =================================================================
-# --- 0. FIREBASE SETUP ---
+# --- 0. FIREBASE SETUP (FIXED) ---
 # =================================================================
 SERVICE_ACCOUNT_FILE = 'sgamoffice-firebase-adminsdk-fbsvc-253915b05b.json' 
 SICK_COLLECTION = "sickemp"
@@ -17,16 +17,21 @@ EMP_COLLECTION = "employees"
 def init_db():
     if not firebase_admin._apps:
         try:
-            if st.secrets.get("firebase_config"):
+            # चेक करें कि क्या Streamlit Secrets में कॉन्फ़िगरेशन है
+            if "firebase_config" in st.secrets:
                 cred_dict = dict(st.secrets["firebase_config"])
+                # Private key में \n को सही से हैंडल करना
                 if isinstance(cred_dict.get('private_key'), str):
                     cred_dict['private_key'] = cred_dict['private_key'].replace('\\n', '\n')
                 cred = credentials.Certificate(cred_dict)
             else:
+                # लोकल में फ़ाइल का उपयोग करें
                 cred = credentials.Certificate(SERVICE_ACCOUNT_FILE)
+            
             firebase_admin.initialize_app(cred)
         except Exception as e:
-            st.error(f"Firebase Error: {e}")
+            st.error(f"Firebase Initialization Error: {e}")
+            st.stop()
     return firestore.client()
 
 db = init_db()
@@ -36,7 +41,8 @@ db = init_db()
 # =================================================================
 def get_employees():
     docs = db.collection(EMP_COLLECTION).stream()
-    return pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in docs])
+    data = [{**d.to_dict(), 'id': d.id} for d in docs]
+    return pd.DataFrame(data) if data else pd.DataFrame()
 
 def get_sick_records():
     docs = db.collection(SICK_COLLECTION).stream()
@@ -44,29 +50,31 @@ def get_sick_records():
     return pd.DataFrame(data) if data else pd.DataFrame()
 
 def generate_docx(template_path, data):
-    doc = Document(template_path)
-    # Paragraphs mein placeholders badalna
-    for p in doc.paragraphs:
-        for key, value in data.items():
-            placeholder = f"[{key}]"
-            if placeholder in p.text:
-                p.text = p.text.replace(placeholder, str(value))
-    
-    # Tables ke andar bhi placeholders check karein
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for key, value in data.items():
-                    placeholder = f"[{key}]"
-                    if placeholder in cell.text:
-                        cell.text = cell.text.replace(placeholder, str(value))
-    
-    bio = io.BytesIO()
-    doc.save(bio)
-    return bio.getvalue()
+    try:
+        doc = Document(template_path)
+        # Paragraphs में बदलाव
+        for p in doc.paragraphs:
+            for key, value in data.items():
+                if f"[{key}]" in p.text:
+                    p.text = p.text.replace(f"[{key}]", str(value))
+        
+        # Tables में बदलाव
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for key, value in data.items():
+                        if f"[{key}]" in cell.text:
+                            cell.text = cell.text.replace(f"[{key}]", str(value))
+        
+        bio = io.BytesIO()
+        doc.save(bio)
+        return bio.getvalue()
+    except Exception as e:
+        st.error(f"Template Error: {e}")
+        return None
 
 # =================================================================
-# --- 2. AUTHENTICATION ---
+# --- 2. AUTHENTICATION & UI ---
 # =================================================================
 st.set_page_config(layout="wide", page_title="Railway Sick Management")
 
@@ -83,103 +91,79 @@ if not st.session_state.auth:
                 st.session_state.auth = True
                 st.rerun()
             else:
-                st.error("Invalid Password")
+                st.error("Invalid Credentials")
     st.stop()
 
-# =================================================================
-# --- 3. MAIN UI ---
-# =================================================================
+# --- MAIN APP UI ---
 tab1, tab2 = st.tabs(["📝 Sick Memo Generate", "📊 Report & Return Update"])
 
-# --- TAB 1: SICK MEMO GENERATION ---
 with tab1:
-    st.header("📋 Generate New Sick Memo")
+    st.header("📋 Generate Sick Memo")
     df_emp = get_employees()
     
     if not df_emp.empty:
-        # Search & Selection
         emp_list = df_emp.apply(lambda r: f"{r.get('Employee Name')} ({r.get('HRMS ID')})", axis=1).tolist()
         selected = st.selectbox("Search Employee", emp_list)
         
         h_id = selected.split('(')[-1].strip(')')
         emp_data = df_emp[df_emp['HRMS ID'] == h_id].iloc[0]
         
-        with st.form("sick_memo_form", clear_on_submit=True):
+        with st.form("memo_form", clear_on_submit=True):
             c1, c2 = st.columns(2)
-            memo_date = c1.date_input("Memo Date", value=datetime.now())
-            hospital = c2.selectbox("Hospital Name", ["BEOHARI", "NEW KATNI", "OTHER"])
+            memo_date = c1.date_input("Memo Date")
+            hospital = c2.selectbox("Hospital", ["BEOHARI", "NEW KATNI", "OTHER"])
             
-            # Placeholders from Word File
-            memo_data = {
-                "LetterDate": memo_date.strftime("%d/%m/%Y"),
-                "EmployeeName": emp_data.get('Employee Name', 'N/A'),
-                "Designation": emp_data.get('Designation', 'N/A'),
-                "UnitNumber": emp_data.get('UNIT No.', 'N/A')
-            }
-            
-            if st.form_submit_button("Generate & Save Record"):
-                try:
-                    # 1. Save to Firebase sickemp collection
-                    db.collection(SICK_COLLECTION).add({
-                        "HRMS_ID": h_id,
-                        "Name": memo_data["EmployeeName"],
-                        "Designation": memo_data["Designation"],
-                        "SickDate": str(memo_date),
-                        "Hospital": hospital,
-                        "Status": "SICK",
-                        "ReturnDate": None,
-                        "Timestamp": datetime.now()
-                    })
-                    
-                    # 2. Generate Word File
-                    docx_out = generate_docx("SICK MEMO temp.docx", memo_data)
-                    st.success(f"Record for {memo_data['EmployeeName']} saved successfully!")
-                    st.download_button("📥 Download Filled Sick Memo", docx_out, f"Sick_Memo_{h_id}.docx")
-                except Exception as e:
-                    st.error(f"Error: {e}")
+            if st.form_submit_button("Generate & Save"):
+                memo_data = {
+                    "LetterDate": memo_date.strftime("%d/%m/%Y"),
+                    "EmployeeName": emp_data.get('Employee Name', ''),
+                    "Designation": emp_data.get('Designation', ''),
+                    "UnitNumber": emp_data.get('UNIT No.', '')
+                }
+                
+                # Firestore में सेव करें
+                db.collection(SICK_COLLECTION).add({
+                    "HRMS_ID": h_id,
+                    "Name": memo_data["EmployeeName"],
+                    "Designation": memo_data["Designation"],
+                    "SickDate": str(memo_date),
+                    "Hospital": hospital,
+                    "Status": "SICK",
+                    "ReturnDate": None
+                })
+                
+                # Word फाइल बनाएँ
+                docx_out = generate_docx("SICK MEMO temp.docx", memo_data)
+                if docx_out:
+                    st.success("Record Saved!")
+                    st.download_button("📥 Download Memo", docx_out, f"Sick_Memo_{h_id}.docx")
     else:
-        st.warning("No employees found in master database.")
+        st.warning("No data found in Employee Collection.")
 
-# --- TAB 2: REPORTS & RETURN UPDATES ---
 with tab2:
-    st.header("📊 Sick Employee Dashboard")
+    st.header("📊 Sick History & Updates")
     df_sick = get_sick_records()
     
     if not df_sick.empty:
-        # 1. RETURN TO DUTY SECTION
-        st.subheader("🔄 Update Return from Sick (Entry)")
-        # Filter only currently SICK employees
+        st.subheader("🔄 Update Return Date (FIT)")
         active_sick = df_sick[df_sick['Status'] == 'SICK']
         
         if not active_sick.empty:
-            sick_options = active_sick.apply(lambda r: f"{r['Name']} (Since: {r['SickDate']})", axis=1).tolist()
-            returning_emp = st.selectbox("Select Employee returning to Duty", sick_options)
+            sick_names = active_sick.apply(lambda r: f"{r['Name']} (Sick: {r['SickDate']})", axis=1).tolist()
+            returning = st.selectbox("Select Employee", sick_options := sick_names)
+            ret_date = st.date_input("Return Date")
             
-            idx = sick_options.index(returning_emp)
-            doc_to_update = active_sick.iloc[idx]
-            
-            ret_date = st.date_input("Return (FIT) Date", value=datetime.now())
-            
-            if st.button("Confirm Return & Mark FIT"):
-                db.collection(SICK_COLLECTION).document(doc_to_update['id']).update({
+            if st.button("Mark as FIT"):
+                idx = sick_options.index(returning)
+                doc_id = active_sick.iloc[idx]['id']
+                db.collection(SICK_COLLECTION).document(doc_id).update({
                     "Status": "FIT",
                     "ReturnDate": str(ret_date)
                 })
-                st.success(f"{doc_to_update['Name']} is now marked as FIT.")
+                st.success("Status updated to FIT")
                 st.rerun()
-        else:
-            st.info("No employees are currently on SICK status.")
-
-        # 2. FULL REPORT TABLE
-        st.divider()
-        st.subheader("📑 All Sick Records History")
-        # Formatting for display
-        display_df = df_sick.drop(columns=['id', 'Timestamp'], errors='ignore')
-        st.dataframe(display_df, use_container_width=True)
         
-        # Download Report CSV
-        report_csv = display_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-        st.download_button("📥 Download History Report", report_csv, "Sick_History_Report.csv", "text/csv")
+        st.divider()
+        st.dataframe(df_sick.drop(columns=['id']), use_container_width=True)
     else:
-        st.info("No sick records found in 'sickemp' collection.")
-
+        st.info("No sick records yet.")
