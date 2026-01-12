@@ -56,7 +56,6 @@ def get_noc_count_this_year(pf_number):
     return len(list(docs))
 
 def create_noc_table(doc, emp_data_list):
-    # Search for [PFNumber] placeholder
     for p in doc.paragraphs:
         if "[PFNumber]" in p.text:
             p.text = p.text.replace("[PFNumber]", "")
@@ -70,22 +69,19 @@ def create_noc_table(doc, emp_data_list):
             for idx, emp in enumerate(emp_data_list):
                 row = table.add_row().cells
                 row[0].text = str(idx + 1)
-                row[1].text = str(emp['PFNumber'])
-                row[2].text = str(emp['Name'])
-                row[3].text = str(emp['Desig'])
-                row[4].text = str(emp['ExamName'])
-                row[5].text = str(emp['Term'])
+                row[1].text = str(emp.get('PFNumber', ''))
+                row[2].text = str(emp.get('Name', ''))
+                row[3].text = str(emp.get('Desig', ''))
+                row[4].text = str(emp.get('ExamName', ''))
+                row[5].text = str(emp.get('Term', ''))
             break
 
 def generate_multi_noc(template_path, l_date, emp_data_list):
     if not os.path.exists(template_path):
-        st.error(f"Template file missing: {template_path}")
         return None
     try:
         doc = Document(template_path)
         formatted_date = l_date.strftime("%d-%m-%Y")
-        
-        # Replacements
         for p in doc.paragraphs:
             if "[LetterDate]" in p.text:
                 p.text = p.text.replace("[LetterDate]", formatted_date)
@@ -94,14 +90,12 @@ def generate_multi_noc(template_path, l_date, emp_data_list):
                 for cell in row.cells:
                     if "[LetterDate]" in cell.text:
                         cell.text = cell.text.replace("[LetterDate]", formatted_date)
-
         create_noc_table(doc, emp_data_list)
-        
         bio = io.BytesIO()
         doc.save(bio)
         return bio.getvalue()
     except Exception as e:
-        st.error(f"Word Generation Error: {e}")
+        st.error(f"Error: {e}")
         return None
 
 # =================================================================
@@ -113,82 +107,57 @@ if 'auth' not in st.session_state:
     st.session_state.auth = False
 
 if not st.session_state.auth:
-    st.title("🔒 Exam NOC Login")
+    st.title("🔒 Login")
     with st.form("login"):
-        u = st.text_input("Username")
-        p = st.text_input("Password", type="password")
-        if st.form_submit_button("Login"):
-            if u == "admin" and p == "Sgam@4321":
-                st.session_state.auth = True
-                st.rerun()
-            else:
-                st.error("Invalid Credentials")
+        u, p = st.text_input("User"), st.text_input("Pass", type="password")
+        if st.form_submit_button("Login") and u == "admin" and p == "Sgam@4321":
+            st.session_state.auth = True
+            st.rerun()
     st.stop()
 
 tab1, tab2 = st.tabs(["📝 Generate NOC", "📊 NOC Records Report"])
 
 with tab1:
-    st.header("Exam NOC Taiyar Karein")
+    st.header("Exam NOC Generator")
     df_emp = get_employees()
-    
     if not df_emp.empty:
-        # Better mapping for selectbox
         df_emp['Display'] = df_emp['Employee Name'] + " (" + df_emp['PF Number'].astype(str) + ")"
         selected_display = st.multiselect("Karmchari Chunein", df_emp['Display'].tolist())
-        
         final_list = []
         if selected_display:
-            st.subheader("Exam Details Bharein")
             for display_val in selected_display:
-                # Safe PF extraction
-                pf_to_find = display_val.split('(')[-1].replace(')', '').strip()
-                
-                # Filter safely
-                temp_df = df_emp[df_emp['PF Number'].astype(str) == pf_to_find]
-                
-                if not temp_df.empty:
-                    row = temp_df.iloc[0]
-                    col1, col2 = st.columns([2, 1])
-                    with col1:
-                        exam = st.text_input(f"Exam Name for {row['Employee Name']}", key=f"ex_{pf_to_find}")
-                    with col2:
-                        count = get_noc_count_this_year(pf_to_find)
-                        terms = ["First", "Second", "Third", "Fourth"]
-                        term = terms[count] if count < 4 else "Exceeded"
-                        
-                        if term != "Exceeded":
-                            st.info(f"Term: {term}")
-                            final_list.append({
-                                "PFNumber": pf_to_find,
-                                "Name": row.get('Employee Name in Hindi', row['Employee Name']),
-                                "Desig": row.get('Designation in Hindi', row['Designation']),
-                                "ExamName": exam,
-                                "Term": term,
-                                "Year": datetime.now().year,
-                                "Timestamp": datetime.now()
-                            })
-                        else:
-                            st.error(f"{row['Employee Name']} has already taken 4 NOCs.")
-                else:
-                    st.warning(f"PF Number {pf_to_find} database mein nahi mila.")
+                pf = display_val.split('(')[-1].replace(')', '').strip()
+                row = df_emp[df_emp['PF Number'].astype(str) == pf].iloc[0]
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    exam = st.text_input(f"Exam for {row['Employee Name']}", key=f"ex_{pf}")
+                with col2:
+                    count = get_noc_count_this_year(pf)
+                    term = ["First", "Second", "Third", "Fourth"][count] if count < 4 else None
+                    if term:
+                        st.info(f"Term: {term}")
+                        final_list.append({
+                            "PFNumber": pf, "Name": row.get('Employee Name in Hindi', row['Employee Name']),
+                            "Desig": row.get('Designation in Hindi', row['Designation']),
+                            "ExamName": exam, "Term": term, "Year": datetime.now().year, "Timestamp": datetime.now()
+                        })
+                    else: st.error("Limit Exceeded")
 
-            if st.button("Generate & Save NOC"):
-                if final_list and all(item['ExamName'] for item in final_list):
-                    out = generate_multi_noc(TEMPLATE_PATH, datetime.now(), final_list)
-                    if out:
-                        for item in final_list:
-                            db.collection(NOC_HISTORY_COLLECTION).add(item)
-                        st.success("✅ Records Saved!")
-                        st.download_button("📥 Download NOC Letter", out, f"NOC_Report_{datetime.now().strftime('%Y%m%d')}.docx")
-                else:
-                    st.warning("Kripya sabhi Exam Names bharein.")
-    else:
-        st.info("Employee database khali hai.")
+            if st.button("Generate & Save") and final_list:
+                out = generate_multi_noc(TEMPLATE_PATH, datetime.now(), final_list)
+                if out:
+                    for item in final_list: db.collection(NOC_HISTORY_COLLECTION).add(item)
+                    st.success("Saved!")
+                    st.download_button("📥 Download", out, "NOC.docx")
 
 with tab2:
-    st.header("📊 Exam NOC History Report")
-    df_history = get_noc_history()
-    if not df_history.empty:
-        st.dataframe(df_history[['Timestamp', 'PFNumber', 'Name', 'Designation', 'ExamName', 'Term', 'Year']], use_container_width=True)
+    st.header("📊 History Report")
+    df_h = get_noc_history()
+    if not df_h.empty:
+        # Columns list jo hum dikhana chahte hain
+        cols_to_show = ['Timestamp', 'PFNumber', 'Name', 'Designation', 'ExamName', 'Term', 'Year']
+        # Sirf wahi columns select karein jo dataframe mein exist karte hain (Fix for KeyError)
+        available_cols = [c for c in cols_to_show if c in df_h.columns]
+        st.dataframe(df_h[available_cols], use_container_width=True)
     else:
-        st.info("Koyi records nahi mile.")
+        st.info("No records found.")
