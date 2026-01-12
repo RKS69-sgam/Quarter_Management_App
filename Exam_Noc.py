@@ -11,9 +11,10 @@ from firebase_admin import credentials, firestore
 # --- 0. PATH & FIREBASE SETUP ---
 # =================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# Template file path setup
-TEMPLATE_PATH = os.path.join(BASE_DIR, "assets", "Exam NOC Letter temp (1).docx")
+# File name updated to 'Exam NOC Letter temp.docx'
+TEMPLATE_PATH = os.path.join(BASE_DIR, "assets", "Exam NOC Letter temp.docx")
 
+SICK_COLLECTION = "sickemp"
 EMP_COLLECTION = "employees"
 
 @st.cache_resource
@@ -44,7 +45,7 @@ def get_employees():
     return pd.DataFrame(data) if data else pd.DataFrame()
 
 def safe_replace(paragraphs, data):
-    """Word formatting barkaraar rakhne ke liye 'runs' ka istemal"""
+    [span_0](start_span)[span_1](start_span)"""Formatting barkaraar rakhne ke liye Runs replacement[span_0](end_span)[span_1](end_span)"""
     for p in paragraphs:
         for key, value in data.items():
             placeholder = f"[{key}]"
@@ -57,13 +58,13 @@ def safe_replace(paragraphs, data):
 
 def generate_docx(template_path, data):
     if not os.path.exists(template_path):
-        st.error(f"Template not found at: {template_path}")
+        st.error(f"Template not found: {template_path}")
         return None
     try:
         doc = Document(template_path)
         # 1. Normal Paragraphs
         safe_replace(doc.paragraphs, data)
-        # 2. Tables
+        # 2. [span_2](start_span)Tables (Header and Date Table)[span_2](end_span)
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
@@ -73,20 +74,20 @@ def generate_docx(template_path, data):
         doc.save(bio)
         return bio.getvalue()
     except Exception as e:
-        st.error(f"Word file error: {e}")
+        st.error(f"Word file Error: {e}")
         return None
 
 # =================================================================
 # --- 2. AUTHENTICATION (Sgam@4321) ---
 # =================================================================
-st.set_page_config(layout="wide", page_title="Railway Exam NOC Management")
+st.set_page_config(layout="wide", page_title="Railway NOC System")
 
 if 'auth' not in st.session_state:
     st.session_state.auth = False
 
 if not st.session_state.auth:
-    st.title("🔒 Exam NOC Management Login")
-    with st.form("login"):
+    st.title("🔒 Exam NOC Login")
+    with st.form("login_form"):
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
         if st.form_submit_button("Login"):
@@ -94,13 +95,13 @@ if not st.session_state.auth:
                 st.session_state.auth = True
                 st.rerun()
             else:
-                st.error("Invalid Password")
+                st.error("Invalid Password!")
     st.stop()
 
 # =================================================================
-# --- 3. MAIN UI ---
+# --- 3. UI LOGIC ---
 # =================================================================
-st.header("📝 Exam NOC Letter Taiyar Karein")
+st.header("📋 Exam NOC Letter Taiyar Karein")
 df_emp = get_employees()
 
 if not df_emp.empty:
@@ -110,37 +111,38 @@ if not df_emp.empty:
     h_id = selected.split('(')[-1].strip(')')
     emp_data = df_emp[df_emp['HRMS ID'] == h_id].iloc[0]
 
-    if 'noc_docx' not in st.session_state:
-        st.session_state.noc_docx = None
-    if 'current_h_id' not in st.session_state:
-        st.session_state.current_h_id = ""
+    # Session storage for download button
+    if 'noc_doc' not in st.session_state:
+        st.session_state.noc_doc = None
+    if 'hid_last' not in st.session_state:
+        st.session_state.hid_last = ""
 
-    with st.form(key=f"noc_form_{h_id}"):
-        letter_date = st.date_input("Letter Date", value=datetime.now())
+    with st.form(key=f"noc_form_v2_{h_id}"):
+        l_date = st.date_input("Letter Date", value=datetime.now())
         
-        # NOC specific mapping using Hindi priority
+        # [span_3](start_span)[span_4](start_span)NOC Mapping[span_3](end_span)[span_4](end_span)
         memo_data = {
-            "LetterDate": letter_date.strftime("%d/%m/%Y"),
+            "LetterDate": l_date.strftime("%d/%m/%Y"),
             "EmployeeName": emp_data.get('Employee Name in Hindi', emp_data.get('Employee Name', '')),
             "Designation": emp_data.get('Designation in Hindi', emp_data.get('Designation', '')),
             "UnitNumber": emp_data.get('UNIT No.', ''),
-            [span_0](start_span)"PFNumber": emp_data.get('PF Number', '')[span_0](end_span)
+            "PFNumber": emp_data.get('PF Number', '')
         }
         
-        if st.form_submit_button("Generate NOC Letter"):
-            docx_out = generate_docx(TEMPLATE_PATH, memo_data)
-            if docx_out:
-                st.session_state.noc_docx = docx_out
-                st.session_state.current_h_id = h_id
-                st.success("✅ NOC Letter generate ho gaya! Niche se download karein.")
+        if st.form_submit_button("Generate NOC"):
+            out = generate_docx(TEMPLATE_PATH, memo_data)
+            if out:
+                st.session_state.noc_doc = out
+                st.session_state.hid_last = h_id
+                st.success("✅ NOC generate ho gaya! Niche se download karein.")
 
-    # Download button outside form
-    if st.session_state.noc_docx and st.session_state.current_h_id == h_id:
+    # Download link outside form
+    if st.session_state.noc_doc and st.session_state.hid_last == h_id:
         st.download_button(
-            label="📥 Download Exam NOC Letter (DOCX)",
-            data=st.session_state.noc_docx,
-            file_name=f"Exam_NOC_{h_id}.docx",
+            label="📥 Download NOC Letter",
+            data=st.session_state.noc_doc,
+            file_name=f"NOC_{h_id}.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
 else:
-    st.warning("Database mein koi data nahi mila.")
+    st.warning("No data found.")
