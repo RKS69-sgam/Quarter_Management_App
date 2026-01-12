@@ -40,7 +40,8 @@ db = init_db()
 # =================================================================
 def get_employees():
     docs = db.collection(EMP_COLLECTION).stream()
-    return pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in docs])
+    data = [{**d.to_dict(), 'id': d.id} for d in docs]
+    return pd.DataFrame(data)
 
 def get_noc_history():
     docs = db.collection(NOC_HISTORY_COLLECTION).order_by("Timestamp", direction=firestore.Query.DESCENDING).stream()
@@ -50,12 +51,12 @@ def get_noc_history():
 def get_noc_count_this_year(pf_number):
     current_year = datetime.now().year
     docs = db.collection(NOC_HISTORY_COLLECTION)\
-             .where("PFNumber", "==", pf_number)\
+             .where("PFNumber", "==", str(pf_number))\
              .where("Year", "==", current_year).stream()
     return len(list(docs))
 
 def create_noc_table(doc, emp_data_list):
-    # [PFNumber] placeholder dhundh kar table insert karna
+    # Search for [PFNumber] placeholder
     for p in doc.paragraphs:
         if "[PFNumber]" in p.text:
             p.text = p.text.replace("[PFNumber]", "")
@@ -77,31 +78,36 @@ def create_noc_table(doc, emp_data_list):
             break
 
 def generate_multi_noc(template_path, l_date, emp_data_list):
-    if not os.path.exists(template_path): return None
-    doc = Document(template_path)
-    
-    # 1. Date Replacement
-    formatted_date = l_date.strftime("%d-%m-%Y")
-    for p in doc.paragraphs:
-        if "[LetterDate]" in p.text:
-            p.text = p.text.replace("[LetterDate]", formatted_date)
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                if "[LetterDate]" in cell.text:
-                    cell.text = cell.text.replace("[LetterDate]", formatted_date)
+    if not os.path.exists(template_path):
+        st.error(f"Template file missing: {template_path}")
+        return None
+    try:
+        doc = Document(template_path)
+        formatted_date = l_date.strftime("%d-%m-%Y")
+        
+        # Replacements
+        for p in doc.paragraphs:
+            if "[LetterDate]" in p.text:
+                p.text = p.text.replace("[LetterDate]", formatted_date)
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    if "[LetterDate]" in cell.text:
+                        cell.text = cell.text.replace("[LetterDate]", formatted_date)
 
-    # 2. Add Dynamic Table
-    create_noc_table(doc, emp_data_list)
-    
-    bio = io.BytesIO()
-    doc.save(bio)
-    return bio.getvalue()
+        create_noc_table(doc, emp_data_list)
+        
+        bio = io.BytesIO()
+        doc.save(bio)
+        return bio.getvalue()
+    except Exception as e:
+        st.error(f"Word Generation Error: {e}")
+        return None
 
 # =================================================================
 # --- 2. MAIN UI ---
 # =================================================================
-st.set_page_config(layout="wide", page_title="Exam NOC System")
+st.set_page_config(layout="wide", page_title="Railway NOC System")
 
 if 'auth' not in st.session_state:
     st.session_state.auth = False
@@ -121,41 +127,50 @@ if not st.session_state.auth:
 
 tab1, tab2 = st.tabs(["📝 Generate NOC", "📊 NOC Records Report"])
 
-# --- TAB 1: GENERATE ---
 with tab1:
     st.header("Exam NOC Taiyar Karein")
     df_emp = get_employees()
+    
     if not df_emp.empty:
-        emp_options = df_emp.apply(lambda r: f"{r.get('Employee Name')} ({r.get('PF Number')})", axis=1).tolist()
-        selected_names = st.multiselect("Karmchari Chunein (Multiple Select Kar Sakte Hain)", emp_options)
+        # Better mapping for selectbox
+        df_emp['Display'] = df_emp['Employee Name'] + " (" + df_emp['PF Number'].astype(str) + ")"
+        selected_display = st.multiselect("Karmchari Chunein", df_emp['Display'].tolist())
         
         final_list = []
-        if selected_names:
+        if selected_display:
             st.subheader("Exam Details Bharein")
-            for name in selected_names:
-                pf = name.split('(')[-1].strip(')')
-                row = df_emp[df_emp['PF Number'] == pf].iloc[0]
+            for display_val in selected_display:
+                # Safe PF extraction
+                pf_to_find = display_val.split('(')[-1].replace(')', '').strip()
                 
-                col1, col2 = st.columns([2, 1])
-                with col1:
-                    exam = st.text_input(f"Exam Name for {row['Employee Name']}", key=f"ex_{pf}")
-                with col2:
-                    count = get_noc_count_this_year(pf)
-                    terms = ["First", "Second", "Third", "Fourth"]
-                    if count < 4:
-                        term = terms[count]
-                        st.info(f"Auto Term: {term}")
-                        final_list.append({
-                            "PFNumber": pf,
-                            "Name": row.get('Employee Name in Hindi', row['Employee Name']),
-                            "Desig": row.get('Designation in Hindi', row['Designation']),
-                            "ExamName": exam,
-                            "Term": term,
-                            "Year": datetime.now().year,
-                            "Timestamp": datetime.now()
-                        })
-                    else:
-                        st.error("Limit Reached (4 NOCs Already Taken)")
+                # Filter safely
+                temp_df = df_emp[df_emp['PF Number'].astype(str) == pf_to_find]
+                
+                if not temp_df.empty:
+                    row = temp_df.iloc[0]
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        exam = st.text_input(f"Exam Name for {row['Employee Name']}", key=f"ex_{pf_to_find}")
+                    with col2:
+                        count = get_noc_count_this_year(pf_to_find)
+                        terms = ["First", "Second", "Third", "Fourth"]
+                        term = terms[count] if count < 4 else "Exceeded"
+                        
+                        if term != "Exceeded":
+                            st.info(f"Term: {term}")
+                            final_list.append({
+                                "PFNumber": pf_to_find,
+                                "Name": row.get('Employee Name in Hindi', row['Employee Name']),
+                                "Desig": row.get('Designation in Hindi', row['Designation']),
+                                "ExamName": exam,
+                                "Term": term,
+                                "Year": datetime.now().year,
+                                "Timestamp": datetime.now()
+                            })
+                        else:
+                            st.error(f"{row['Employee Name']} has already taken 4 NOCs.")
+                else:
+                    st.warning(f"PF Number {pf_to_find} database mein nahi mila.")
 
             if st.button("Generate & Save NOC"):
                 if final_list and all(item['ExamName'] for item in final_list):
@@ -164,36 +179,16 @@ with tab1:
                         for item in final_list:
                             db.collection(NOC_HISTORY_COLLECTION).add(item)
                         st.success("✅ Records Saved!")
-                        st.download_button("📥 Download NOC Letter", out, "Exam_NOC.docx")
+                        st.download_button("📥 Download NOC Letter", out, f"NOC_Report_{datetime.now().strftime('%Y%m%d')}.docx")
                 else:
-                    st.warning("Sabhi Exam Names bharna zaroori hai.")
+                    st.warning("Kripya sabhi Exam Names bharein.")
+    else:
+        st.info("Employee database khali hai.")
 
-# --- TAB 2: REPORT ---
 with tab2:
     st.header("📊 Exam NOC History Report")
     df_history = get_noc_history()
-    
     if not df_history.empty:
-        # Summary Metrics
-        c1, c2 = st.columns(2)
-        total_noc = len(df_history)
-        unique_emp = df_history['PFNumber'].nunique()
-        c1.metric("Total NOCs Issued", total_noc)
-        c2.metric("Unique Employees", unique_emp)
-        
-        # Filter by PF Number
-        search_pf = st.text_input("PF Number se Search Karein")
-        if search_pf:
-            df_history = df_history[df_history['PFNumber'].str.contains(search_pf)]
-        
-        # Display Table
-        st.dataframe(
-            df_history[['Timestamp', 'PFNumber', 'Name', 'Designation', 'ExamName', 'Term', 'Year']],
-            use_container_width=True
-        )
-        
-        # Export Option
-        csv = df_history.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 Download Full Report (CSV)", csv, "NOC_Report.csv", "text/csv")
+        st.dataframe(df_history[['Timestamp', 'PFNumber', 'Name', 'Designation', 'ExamName', 'Term', 'Year']], use_container_width=True)
     else:
-        st.info("Abhi tak koi NOC record nahi hai.")
+        st.info("Koyi records nahi mile.")
