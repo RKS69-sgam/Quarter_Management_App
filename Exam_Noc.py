@@ -11,10 +11,10 @@ from firebase_admin import credentials, firestore
 # --- 0. PATH & FIREBASE SETUP ---
 # =================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# File name corrected as per your request
 TEMPLATE_PATH = os.path.join(BASE_DIR, "assets", "Exam NOC Letter temp.docx")
 
 EMP_COLLECTION = "employees"
+NOC_HISTORY_COLLECTION = "noc_history"
 
 @st.cache_resource
 def init_db():
@@ -29,7 +29,7 @@ def init_db():
                 cred = credentials.Certificate('sgamoffice-firebase-adminsdk-fbsvc-253915b05b.json')
             firebase_admin.initialize_app(cred)
         except Exception as e:
-            st.error(f"Firebase Init Error: {e}")
+            st.error(f"Firebase Error: {e}")
             st.stop()
     return firestore.client()
 
@@ -40,45 +40,66 @@ db = init_db()
 # =================================================================
 def get_employees():
     docs = db.collection(EMP_COLLECTION).stream()
+    return pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in docs])
+
+def get_noc_history():
+    docs = db.collection(NOC_HISTORY_COLLECTION).order_by("Timestamp", direction=firestore.Query.DESCENDING).stream()
     data = [{**d.to_dict(), 'id': d.id} for d in docs]
     return pd.DataFrame(data) if data else pd.DataFrame()
 
-def safe_replace(paragraphs, data):
-    # Formatting barkaraar rakhne ke liye runs ka istemal
-    for p in paragraphs:
-        for key, value in data.items():
-            placeholder = f"[{key}]"
-            if placeholder in p.text:
-                for run in p.runs:
-                    if placeholder in run.text:
-                        run.text = run.text.replace(placeholder, str(value))
-                # Double check for split placeholders
-                if placeholder in p.text:
-                    p.text = p.text.replace(placeholder, str(value))
+def get_noc_count_this_year(pf_number):
+    current_year = datetime.now().year
+    docs = db.collection(NOC_HISTORY_COLLECTION)\
+             .where("PFNumber", "==", pf_number)\
+             .where("Year", "==", current_year).stream()
+    return len(list(docs))
 
-def generate_docx(template_path, data):
-    if not os.path.exists(template_path):
-        st.error(f"Template not found at: {template_path}")
-        return None
-    try:
-        doc = Document(template_path)
-        # 1. [span_0](start_span)Replace in normal paragraphs[span_0](end_span)
-        safe_replace(doc.paragraphs, data)
-        # 2. [span_1](start_span)Replace in tables (Header & Date)[span_1](end_span)
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    safe_replace(cell.paragraphs, data)
-        
-        bio = io.BytesIO()
-        doc.save(bio)
-        return bio.getvalue()
-    except Exception as e:
-        st.error(f"Word file error: {e}")
-        return None
+def create_noc_table(doc, emp_data_list):
+    # [PFNumber] placeholder dhundh kar table insert karna
+    for p in doc.paragraphs:
+        if "[PFNumber]" in p.text:
+            p.text = p.text.replace("[PFNumber]", "")
+            table = doc.add_table(rows=1, cols=6)
+            table.style = 'Table Grid'
+            hdr = table.rows[0].cells
+            headers = ['Sr. No.', 'PF Number', 'Employee Name', 'Designation', "Exam's Name", 'Term of NOC']
+            for i, h_text in enumerate(headers):
+                hdr[i].text = h_text
+            
+            for idx, emp in enumerate(emp_data_list):
+                row = table.add_row().cells
+                row[0].text = str(idx + 1)
+                row[1].text = str(emp['PFNumber'])
+                row[2].text = str(emp['Name'])
+                row[3].text = str(emp['Desig'])
+                row[4].text = str(emp['ExamName'])
+                row[5].text = str(emp['Term'])
+            break
+
+def generate_multi_noc(template_path, l_date, emp_data_list):
+    if not os.path.exists(template_path): return None
+    doc = Document(template_path)
+    
+    # 1. Date Replacement
+    formatted_date = l_date.strftime("%d-%m-%Y")
+    for p in doc.paragraphs:
+        if "[LetterDate]" in p.text:
+            p.text = p.text.replace("[LetterDate]", formatted_date)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                if "[LetterDate]" in cell.text:
+                    cell.text = cell.text.replace("[LetterDate]", formatted_date)
+
+    # 2. Add Dynamic Table
+    create_noc_table(doc, emp_data_list)
+    
+    bio = io.BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
 
 # =================================================================
-# --- 2. AUTHENTICATION (Sgam@4321) ---
+# --- 2. MAIN UI ---
 # =================================================================
 st.set_page_config(layout="wide", page_title="Exam NOC System")
 
@@ -87,7 +108,7 @@ if 'auth' not in st.session_state:
 
 if not st.session_state.auth:
     st.title("🔒 Exam NOC Login")
-    with st.form("login_form"):
+    with st.form("login"):
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
         if st.form_submit_button("Login"):
@@ -95,54 +116,84 @@ if not st.session_state.auth:
                 st.session_state.auth = True
                 st.rerun()
             else:
-                st.error("Invalid Password")
+                st.error("Invalid Credentials")
     st.stop()
 
-# =================================================================
-# --- 3. MAIN UI ---
-# =================================================================
-st.header("📋 Exam NOC Letter Taiyar Karein")
-df_emp = get_employees()
+tab1, tab2 = st.tabs(["📝 Generate NOC", "📊 NOC Records Report"])
 
-if not df_emp.empty:
-    emp_list = df_emp.apply(lambda r: f"{r.get('Employee Name')} ({r.get('HRMS ID')})", axis=1).tolist()
-    selected = st.selectbox("Karmchari Chunein", emp_list)
+# --- TAB 1: GENERATE ---
+with tab1:
+    st.header("Exam NOC Taiyar Karein")
+    df_emp = get_employees()
+    if not df_emp.empty:
+        emp_options = df_emp.apply(lambda r: f"{r.get('Employee Name')} ({r.get('PF Number')})", axis=1).tolist()
+        selected_names = st.multiselect("Karmchari Chunein (Multiple Select Kar Sakte Hain)", emp_options)
+        
+        final_list = []
+        if selected_names:
+            st.subheader("Exam Details Bharein")
+            for name in selected_names:
+                pf = name.split('(')[-1].strip(')')
+                row = df_emp[df_emp['PF Number'] == pf].iloc[0]
+                
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    exam = st.text_input(f"Exam Name for {row['Employee Name']}", key=f"ex_{pf}")
+                with col2:
+                    count = get_noc_count_this_year(pf)
+                    terms = ["First", "Second", "Third", "Fourth"]
+                    if count < 4:
+                        term = terms[count]
+                        st.info(f"Auto Term: {term}")
+                        final_list.append({
+                            "PFNumber": pf,
+                            "Name": row.get('Employee Name in Hindi', row['Employee Name']),
+                            "Desig": row.get('Designation in Hindi', row['Designation']),
+                            "ExamName": exam,
+                            "Term": term,
+                            "Year": datetime.now().year,
+                            "Timestamp": datetime.now()
+                        })
+                    else:
+                        st.error("Limit Reached (4 NOCs Already Taken)")
+
+            if st.button("Generate & Save NOC"):
+                if final_list and all(item['ExamName'] for item in final_list):
+                    out = generate_multi_noc(TEMPLATE_PATH, datetime.now(), final_list)
+                    if out:
+                        for item in final_list:
+                            db.collection(NOC_HISTORY_COLLECTION).add(item)
+                        st.success("✅ Records Saved!")
+                        st.download_button("📥 Download NOC Letter", out, "Exam_NOC.docx")
+                else:
+                    st.warning("Sabhi Exam Names bharna zaroori hai.")
+
+# --- TAB 2: REPORT ---
+with tab2:
+    st.header("📊 Exam NOC History Report")
+    df_history = get_noc_history()
     
-    h_id = selected.split('(')[-1].strip(')')
-    emp_data = df_emp[df_emp['HRMS ID'] == h_id].iloc[0]
-
-    # Session storage to avoid form errors
-    if 'noc_out' not in st.session_state:
-        st.session_state.noc_out = None
-    if 'last_hid' not in st.session_state:
-        st.session_state.last_hid = ""
-
-    with st.form(key=f"noc_form_{h_id}"):
-        l_date = st.date_input("Letter Date", value=datetime.now())
+    if not df_history.empty:
+        # Summary Metrics
+        c1, c2 = st.columns(2)
+        total_noc = len(df_history)
+        unique_emp = df_history['PFNumber'].nunique()
+        c1.metric("Total NOCs Issued", total_noc)
+        c2.metric("Unique Employees", unique_emp)
         
-        # [span_2](start_span)NOC Mapping logic[span_2](end_span)
-        memo_data = {
-            "LetterDate": l_date.strftime("%d/%m/%Y"),
-            "EmployeeName": emp_data.get('Employee Name in Hindi', emp_data.get('Employee Name', '')),
-            "Designation": emp_data.get('Designation in Hindi', emp_data.get('Designation', '')),
-            "UnitNumber": emp_data.get('UNIT No.', ''),
-            "PFNumber": emp_data.get('PF Number', '')
-        }
+        # Filter by PF Number
+        search_pf = st.text_input("PF Number se Search Karein")
+        if search_pf:
+            df_history = df_history[df_history['PFNumber'].str.contains(search_pf)]
         
-        if st.form_submit_button("Generate NOC"):
-            result = generate_docx(TEMPLATE_PATH, memo_data)
-            if result:
-                st.session_state.noc_out = result
-                st.session_state.last_hid = h_id
-                st.success("✅ NOC taiyar ho gaya!")
-
-    # Download Button (Outside Form)
-    if st.session_state.noc_out and st.session_state.last_hid == h_id:
-        st.download_button(
-            label="📥 Download NOC Letter (DOCX)",
-            data=st.session_state.noc_out,
-            file_name=f"Exam_NOC_{h_id}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        # Display Table
+        st.dataframe(
+            df_history[['Timestamp', 'PFNumber', 'Name', 'Designation', 'ExamName', 'Term', 'Year']],
+            use_container_width=True
         )
-else:
-    st.warning("Database mein koi data nahi mila.")
+        
+        # Export Option
+        csv = df_history.to_csv(index=False).encode('utf-8-sig')
+        st.download_button("📥 Download Full Report (CSV)", csv, "NOC_Report.csv", "text/csv")
+    else:
+        st.info("Abhi tak koi NOC record nahi hai.")
