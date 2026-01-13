@@ -7,7 +7,30 @@ import os
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# --- 0. Path & Firebase Setup ---
+# --- 0. Configuration & Login Logic ---
+ADMIN_USER = "admin"
+ADMIN_PASS = "Sgam@4321"
+
+def check_login():
+    """Login session maintain karne ke liye"""
+    if "logged_in" not in st.session_state:
+        st.session_state.logged_in = False
+
+    if not st.session_state.logged_in:
+        st.title("🔐 Railway DAR System Login")
+        with st.form("login_form"):
+            user = st.text_input("Username")
+            pas = st.text_input("Password", type="password")
+            if st.form_submit_button("Login"):
+                if user == ADMIN_USER and pas == ADMIN_PASS:
+                    st.session_state.logged_in = True
+                    st.rerun()
+                else:
+                    st.error("❌ Galat Username ya Password")
+        return False
+    return True
+
+# --- 1. Database Setup ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_PATH = os.path.join(BASE_DIR, "assets", "DAR NOC temp.docx")
 
@@ -28,112 +51,101 @@ def init_db():
             st.stop()
     return firestore.client()
 
-db = init_db()
-
-# --- 1. Helper Functions ---
-def get_employees():
-    docs = db.collection("employees").stream()
-    return pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in docs])
-
+# --- 2. Functional Logic ---
 def fill_bulk_template(doc, selected_data, report_date):
-    """Template ki table mein multiple employees ki rows add karna"""
-    # 1. [span_0](start_span)Header mein [Date] placeholder replace karein[span_0](end_span)
+    # [span_0](start_span)Header date replacement[span_0](end_span)
     for p in doc.paragraphs:
         if "[Date]" in p.text:
             p.text = p.text.replace("[Date]", report_date)
 
-    # 2. [span_1](start_span)Table process karein[span_1](end_span)
-    if len(doc.tables) > 0:
-        table = doc.tables[0]
-        
-        # [span_2](start_span)Pehli row (index 1) placeholders wali hai[span_2](end_span)
-        for i, emp in enumerate(selected_data):
-            if i == 0:
-                # Pehli row ke placeholders replace karein
-                row_cells = table.rows[1].cells
-            else:
-                # Nayi row add karein
-                new_row = table.add_row()
-                row_cells = new_row.cells
+    if not doc.tables:
+        return doc
+    
+    table = doc.tables[0]
+    # [span_1](start_span)Pehli row placeholders replace karne ke liye (Table row 1)[span_1](end_span)
+    for i, emp in enumerate(selected_data):
+        if i == 0 and len(table.rows) >= 2:
+            row_cells = table.rows[1].cells
+        else:
+            new_row = table.add_row()
+            row_cells = new_row.cells
             
-            row_cells[0].text = str(i + 1)
-            row_cells[1].text = emp['name']
-            row_cells[2].text = emp['desig']
-            row_cells[3].text = emp['pf']
-            row_cells[4].text = "कर्मचारी के विरूद्ध डी.ए.आर. एवं विजिलेंस केश लम्बित नहीं है"
-            
+        row_cells[0].text = str(i + 1)
+        row_cells[1].text = emp['name']
+        row_cells[2].text = emp['desig']
+        row_cells[3].text = emp['pf']
+        row_cells[4].text = "कर्मचारी के विरूद्ध डी.ए.आर. एवं विजिलेंस केश लम्बित नहीं है"
     return doc
 
-# --- 2. Main Interface ---
-st.set_page_config(layout="wide", page_title="Bulk DAR NOC System")
-df_emp = get_employees()
-
-if 'multi_dar_bytes' not in st.session_state: st.session_state.multi_dar_bytes = None
-
-tab1, tab2 = st.tabs(["📝 Generate Multi-Employee NOC", "📊 Report Management"])
-
-with tab1:
-    st.header("Generate Single NOC for Multiple Staff")
-    if not df_emp.empty:
-        # Multiple employees select karne ka option
-        emp_options = df_emp.apply(lambda r: f"{r.get('Employee Name')} ({r.get('HRMS ID')})", axis=1).tolist()
-        selected_names = st.multiselect("Employees Select Karein", emp_options)
-        rep_date = st.date_input("NOC Report Date", value=datetime.now())
-
-        if st.button("Generate Joint NOC"):
-            if not selected_names:
-                st.warning("Kripya kam se kam ek employee select karein.")
-            elif not os.path.exists(TEMPLATE_PATH):
-                st.error("Template 'DAR NOC temp.docx' nahi mila.")
-            else:
-                # Selected staff ka data prepare karein
-                selected_data = []
-                for name_str in selected_names:
-                    h_id = name_str.split('(')[-1].strip(')')
-                    row = df_emp[df_emp['HRMS ID'] == h_id].iloc[0]
-                    selected_data.append({
-                        "name": row.get('Employee Name', ''),
-                        "desig": row.get('Designation', ''),
-                        "pf": row.get('PF Number', h_id)
-                    })
-                
-                # Document bharna
-                doc = Document(TEMPLATE_PATH)
-                filled_doc = fill_bulk_template(doc, selected_data, rep_date.strftime("%d/%m/%Y"))
-                
-                buf = io.BytesIO()
-                filled_doc.save(buf)
-                st.session_state.multi_dar_bytes = buf.getvalue()
-                
-                # History mein entry (har employee ke liye alag)
-                for emp in selected_data:
-                    db.collection("dar_history").add({
-                        "Employee Name": emp['name'],
-                        "Designation": emp['desig'],
-                        "PF Number": emp['pf'],
-                        "Generated_At": datetime.now(),
-                        "Type": "Joint NOC"
-                    })
-                
-                st.success(f"✅ {len(selected_data)} Employees ke liye Joint NOC taiyar hai!")
-
-        if st.session_state.multi_dar_bytes:
-            st.download_button(
-                label="📥 Download Joint NOC Document",
-                data=st.session_state.multi_dar_bytes,
-                file_name=f"Joint_NOC_{datetime.now().strftime('%d%m%Y')}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
-    else:
-        st.warning("Database mein koi employee nahi mila.")
-
-with tab2:
-    st.header("📋 DAR NOC Generation Records")
-    history_docs = db.collection("dar_history").order_by("Generated_At", direction=firestore.Query.DESCENDING).stream()
-    h_list = [{**d.to_dict()} for d in history_docs]
+# --- 3. Main App ---
+def main():
+    st.set_page_config(layout="wide", page_title="DAR NOC Management")
     
-    if h_list:
-        df_h = pd.DataFrame(h_list)
-        st.dataframe(df_h[['Generated_At', 'Employee Name', 'PF Number', 'Type']], use_container_width=True)
-    else:
-        st.info("Abhi tak koi record nahi hai.")
+    if not check_login():
+        return
+
+    # Logout button side bar mein
+    if st.sidebar.button("🚪 Logout"):
+        st.session_state.logged_in = False
+        st.rerun()
+
+    db = init_db()
+    
+    # Employees fetch karein
+    docs = db.collection("employees").stream()
+    df_emp = pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in docs])
+
+    tab1, tab2 = st.tabs(["📝 Generate Joint NOC", "📊 Records History"])
+
+    with tab1:
+        st.header("Bulk DAR NOC Generation")
+        if not df_emp.empty:
+            emp_options = df_emp.apply(lambda r: f"{r.get('Employee Name')} ({r.get('HRMS ID')})", axis=1).tolist()
+            selected_names = st.multiselect("Select Staff", emp_options)
+            rep_date = st.date_input("NOC Date", value=datetime.now())
+
+            if st.button("Generate Joint NOC"):
+                if not selected_names:
+                    st.warning("Staff select karein.")
+                elif not os.path.exists(TEMPLATE_PATH):
+                    st.error("Template nahi mila.")
+                else:
+                    selected_data = []
+                    for name_str in selected_names:
+                        h_id = name_str.split('(')[-1].strip(')')
+                        row = df_emp[df_emp['HRMS ID'] == h_id].iloc[0]
+                        selected_data.append({
+                            "name": row.get('Employee Name', ''),
+                            "desig": row.get('Designation', ''),
+                            "pf": row.get('PF Number', h_id)
+                        })
+                    
+                    doc = Document(TEMPLATE_PATH)
+                    filled_doc = fill_bulk_template(doc, selected_data, rep_date.strftime("%d/%m/%Y"))
+                    
+                    buf = io.BytesIO()
+                    filled_doc.save(buf)
+                    
+                    # History entry
+                    for emp in selected_data:
+                        db.collection("dar_history").add({
+                            "Employee Name": emp['name'],
+                            "PF Number": emp['pf'],
+                            "Generated_At": datetime.now(),
+                            "Type": "Joint NOC"
+                        })
+                    
+                    st.success("✅ NOC Taiyar hai!")
+                    st.download_button("📥 Download Joint NOC", buf.getvalue(), f"NOC_{datetime.now().strftime('%d%m%Y')}.docx")
+        else:
+            st.warning("Database khali hai.")
+
+    with tab2:
+        st.header("📋 Recent DAR Records")
+        h_docs = db.collection("dar_history").order_by("Generated_At", direction=firestore.Query.DESCENDING).limit(50).stream()
+        h_list = [{**d.to_dict()} for d in h_docs]
+        if h_list:
+            st.dataframe(pd.DataFrame(h_list)[['Generated_At', 'Employee Name', 'PF Number']], use_container_width=True)
+
+if __name__ == "__main__":
+    main()
