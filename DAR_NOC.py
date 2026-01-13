@@ -7,15 +7,13 @@ import os
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# --- 0. Configuration & Login Logic ---
+# --- 0. Configuration & Login ---
 ADMIN_USER = "admin"
 ADMIN_PASS = "Sgam@4321"
 
 def check_login():
-    """Login session maintain karne ke liye"""
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
-
     if not st.session_state.logged_in:
         st.title("🔐 Railway DAR System Login")
         with st.form("login_form"):
@@ -30,7 +28,7 @@ def check_login():
         return False
     return True
 
-# --- 1. Database Setup ---
+# --- 1. Setup ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_PATH = os.path.join(BASE_DIR, "assets", "DAR NOC temp.docx")
 
@@ -47,51 +45,49 @@ def init_db():
                 cred = credentials.Certificate('sgamoffice-firebase-adminsdk-fbsvc-253915b05b.json')
             firebase_admin.initialize_app(cred)
         except Exception as e:
-            st.error(f"Firebase Error: {e}")
-            st.stop()
+            st.error(f"Firebase Error: {e}"); st.stop()
     return firestore.client()
 
-# --- 2. Functional Logic ---
+# --- 2. Robust Table Logic ---
 def fill_bulk_template(doc, selected_data, report_date):
-    # [span_0](start_span)Header date replacement[span_0](end_span)
+    # Header Date Replacement
     for p in doc.paragraphs:
         if "[Date]" in p.text:
             p.text = p.text.replace("[Date]", report_date)
 
     if not doc.tables:
+        st.error("Template mein koi table nahi mili!")
         return doc
     
     table = doc.tables[0]
-    # [span_1](start_span)Pehli row placeholders replace karne ke liye (Table row 1)[span_1](end_span)
+    num_cols = len(table.columns)
+
     for i, emp in enumerate(selected_data):
+        # Pehli data row (index 1) use karein ya nayi add karein
         if i == 0 and len(table.rows) >= 2:
             row_cells = table.rows[1].cells
         else:
-            new_row = table.add_row()
-            row_cells = new_row.cells
+            row_cells = table.add_row().cells
             
-        row_cells[0].text = str(i + 1)
-        row_cells[1].text = emp['name']
-        row_cells[2].text = emp['desig']
-        row_cells[3].text = emp['pf']
-        row_cells[4].text = "कर्मचारी के विरूद्ध डी.ए.आर. एवं विजिलेंस केश लम्बित नहीं है"
+        # Safe Assignment (Sirf utne hi columns bharna jitne table mein hain)
+        if num_cols > 0: row_cells[0].text = str(i + 1) # S.No
+        if num_cols > 1: row_cells[1].text = emp['name'] # Name
+        if num_cols > 2: row_cells[2].text = emp['desig'] # Designation
+        if num_cols > 3: row_cells[3].text = emp['pf'] # PF Number
+        if num_cols > 4: row_cells[4].text = "कर्मचारी के विरूद्ध डी.ए.आर. एवं विजिलेंस केश लम्बित नहीं है"
+            
     return doc
 
 # --- 3. Main App ---
 def main():
     st.set_page_config(layout="wide", page_title="DAR NOC Management")
-    
-    if not check_login():
-        return
+    if not check_login(): return
 
-    # Logout button side bar mein
     if st.sidebar.button("🚪 Logout"):
         st.session_state.logged_in = False
         st.rerun()
 
     db = init_db()
-    
-    # Employees fetch karein
     docs = db.collection("employees").stream()
     df_emp = pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in docs])
 
@@ -108,7 +104,7 @@ def main():
                 if not selected_names:
                     st.warning("Staff select karein.")
                 elif not os.path.exists(TEMPLATE_PATH):
-                    st.error("Template nahi mila.")
+                    st.error("Template 'DAR NOC temp.docx' nahi mila!")
                 else:
                     selected_data = []
                     for name_str in selected_names:
@@ -126,7 +122,7 @@ def main():
                     buf = io.BytesIO()
                     filled_doc.save(buf)
                     
-                    # History entry
+                    # Save History
                     for emp in selected_data:
                         db.collection("dar_history").add({
                             "Employee Name": emp['name'],
@@ -135,8 +131,8 @@ def main():
                             "Type": "Joint NOC"
                         })
                     
-                    st.success("✅ NOC Taiyar hai!")
-                    st.download_button("📥 Download Joint NOC", buf.getvalue(), f"NOC_{datetime.now().strftime('%d%m%Y')}.docx")
+                    st.success("✅ Joint NOC Taiyar hai!")
+                    st.download_button("📥 Download Joint NOC", buf.getvalue(), f"Joint_NOC_{datetime.now().strftime('%d%m%Y')}.docx")
         else:
             st.warning("Database khali hai.")
 
