@@ -46,40 +46,56 @@ def init_db():
             st.error(f"Firebase Error: {e}"); st.stop()
     return firestore.client()
 
-# --- 2. Table Logic (Error Handled) ---
+# --- 2. Advanced Document Filling Logic ---
 def fill_bulk_template(doc, selected_data, report_date):
-    # Header Date Replace
+    """Document ke har kone mein [Date] badalna aur aakhri table mein data bharna"""
+    
+    # A. Paragraphs mein date replace karein
     for p in doc.paragraphs:
         if "[Date]" in p.text:
             p.text = p.text.replace("[Date]", str(report_date))
 
+    # B. Sabhi Tables mein date check karein (Header tables ke liye)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    if "[Date]" in p.text:
+                        p.text = p.text.replace("[Date]", str(report_date))
+
+    # C. Headers/Footers mein date check karein
+    for section in doc.sections:
+        for header_p in section.header.paragraphs:
+            if "[Date]" in header_p.text:
+                header_p.text = header_p.text.replace("[Date]", str(report_date))
+
+    # D. Data Table Filling (Sabse aakhri table)
     if not doc.tables:
         st.error("Template mein koi table nahi mili!")
         return doc
     
-    # SADAR PRESHIT ke baad wali table (Last Table)
-    table = doc.tables[-1] 
-    num_cols = len(table.columns)
+    data_table = doc.tables[-1] 
+    num_cols = len(data_table.columns)
 
     for i, emp in enumerate(selected_data):
-        # Index 1 placeholders wali row hai (S.No 1 wali)
-        if i == 0 and len(table.rows) >= 2:
-            row_cells = table.rows[1].cells
+        # Index 1 pehli placeholder row hai
+        if i == 0 and len(data_table.rows) >= 2:
+            row_cells = data_table.rows[1].cells
         else:
-            row_cells = table.add_row().cells
+            row_cells = data_table.add_row().cells
             
-        # str() wrap kiya gaya hai taaki TypeError na aaye
+        # str() wrap kiya gaya hai taaki NoneType error na aaye
         if num_cols > 0: row_cells[0].text = str(i + 1)
         if num_cols > 1: row_cells[1].text = str(emp.get('name', ''))
         if num_cols > 2: row_cells[2].text = str(emp.get('desig', ''))
-        if num_cols > 3: row_cells[3].text = str(emp.get('pf', 'N/A')) # 'N/A' if None
+        if num_cols > 3: row_cells[3].text = str(emp.get('pf', ''))
         if num_cols > 4: row_cells[4].text = "कर्मचारी के विरूद्ध डी.ए.आर. एवं विजिलेंस केश लम्बित नहीं है"
             
     return doc
 
-# --- 3. Main App ---
+# --- 3. Main App Execution ---
 def main():
-    st.set_page_config(layout="wide", page_title="DAR NOC Management")
+    st.set_page_config(layout="wide", page_title="Railway DAR NOC")
     if not check_login(): return
 
     if st.sidebar.button("🚪 Logout"):
@@ -91,43 +107,45 @@ def main():
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     TEMPLATE_PATH = os.path.join(BASE_DIR, "assets", "DAR NOC temp.docx")
 
-    # Data fetch
+    # Employee list fetch
     docs = db.collection("employees").stream()
     df_emp = pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in docs])
 
-    tab1, tab2 = st.tabs(["📝 Generate Joint NOC", "📊 Records History"])
+    tab1, tab2 = st.tabs(["📝 Generate Joint NOC", "📊 View Records"])
 
     with tab1:
-        st.header("Bulk DAR NOC Generation")
+        st.header("Bulk DAR NOC Generator")
         if not df_emp.empty:
             emp_options = df_emp.apply(lambda r: f"{r.get('Employee Name')} ({r.get('HRMS ID')})", axis=1).tolist()
-            selected_names = st.multiselect("Select Staff", emp_options)
-            rep_date = st.date_input("NOC Date", value=datetime.now())
+            selected_names = st.multiselect("Staff Select Karein", emp_options)
+            rep_date = st.date_input("Letter Date", value=datetime.now())
 
-            if st.button("Generate Joint NOC"):
+            if st.button("Generate Joint NOC Document"):
                 if not selected_names:
-                    st.warning("Staff select karein.")
+                    st.warning("Kripya kam se kam ek staff select karein.")
                 elif not os.path.exists(TEMPLATE_PATH):
-                    st.error(f"Template nahi mila: {TEMPLATE_PATH}")
+                    st.error(f"Template File Missing: {TEMPLATE_PATH}")
                 else:
+                    # Selected Staff Details taiyar karein
                     selected_data = []
                     for name_str in selected_names:
                         h_id = name_str.split('(')[-1].strip(')')
                         row = df_emp[df_emp['HRMS ID'] == h_id].iloc[0]
-                        # Safe extraction to avoid NoneType
                         selected_data.append({
                             "name": str(row.get('Employee Name', '')),
                             "desig": str(row.get('Designation', '')),
                             "pf": str(row.get('PF Number') if row.get('PF Number') else h_id)
                         })
                     
+                    # Document Process karein
                     doc = Document(TEMPLATE_PATH)
-                    filled_doc = fill_bulk_template(doc, selected_data, rep_date.strftime("%d/%m/%Y"))
+                    formatted_date = rep_date.strftime("%d/%m/%Y")
+                    filled_doc = fill_bulk_template(doc, selected_data, formatted_date)
                     
                     buf = io.BytesIO()
                     filled_doc.save(buf)
                     
-                    # Save History
+                    # History Update
                     for emp in selected_data:
                         db.collection("dar_history").add({
                             "Employee Name": emp['name'],
@@ -136,13 +154,18 @@ def main():
                             "Type": "Joint NOC"
                         })
                     
-                    st.success("✅ NOC Generated Successfully!")
-                    st.download_button("📥 Download Document", buf.getvalue(), f"NOC_{datetime.now().strftime('%d%m%Y')}.docx")
+                    st.success(f"✅ Joint NOC Taiyar hai ({len(selected_data)} staff)!")
+                    st.download_button(
+                        label="📥 Download Joint NOC (.docx)",
+                        data=buf.getvalue(),
+                        file_name=f"Joint_NOC_{datetime.now().strftime('%d%m%Y')}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    )
         else:
-            st.warning("Database khali hai.")
+            st.warning("Employees database mein nahi mile.")
 
     with tab2:
-        st.header("📋 Recent DAR Records")
+        st.header("📋 Generation History")
         h_docs = db.collection("dar_history").order_by("Generated_At", direction=firestore.Query.DESCENDING).limit(50).stream()
         h_list = [{**d.to_dict()} for d in h_docs]
         if h_list:
