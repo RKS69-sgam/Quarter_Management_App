@@ -10,7 +10,6 @@ from dateutil.relativedelta import relativedelta
 
 # --- 0. PATH & DATABASE SETUP ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# Keval PME template ka path
 TEMPLATE_PATH = os.path.join(BASE_DIR, "assets", "pme memo temp.docx")
 
 @st.cache_resource
@@ -36,6 +35,12 @@ def get_employees():
     docs = db.collection("employees").stream()
     return pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in docs])
 
+def get_pme_history():
+    """Tab 2 ke liye history fetch karne ka function"""
+    docs = db.collection("pme_history").order_by("Timestamp", direction=firestore.Query.DESCENDING).stream()
+    data = [{**d.to_dict(), 'id': d.id} for d in docs]
+    return pd.DataFrame(data) if data else pd.DataFrame()
+
 def calculate_service_and_age(dob_val, doa_val):
     now = datetime.now()
     age, s_year, s_month = "0", "0", "0"
@@ -51,13 +56,12 @@ def calculate_service_and_age(dob_val, doa_val):
     return age, s_year, s_month
 
 def replace_text_logic(doc, data):
-    """Word document ke andar placeholders badalne ka function"""
+    """Placeholder format: {{ key }} replacement logic"""
     def replace_in_paragraphs(paragraphs):
         for p in paragraphs:
             for key, value in data.items():
-                placeholder = "{{ " + key + " }}"
+                placeholder = "{{ " + key + " }}" # Format as per your requirement
                 if placeholder in p.text:
-                    # Runs ko merge karke replace karna taaki formatting na bigde
                     full_text = "".join(run.text for run in p.runs)
                     if placeholder in full_text:
                         new_text = full_text.replace(placeholder, str(value))
@@ -72,7 +76,7 @@ def replace_text_logic(doc, data):
 
 def generate_pme_docx(template_path, data):
     if not os.path.exists(template_path):
-        st.error(f"Template file nahi mili: {template_path}")
+        st.error(f"Template missing: {template_path}")
         return None
     try:
         doc = Document(template_path)
@@ -81,13 +85,12 @@ def generate_pme_docx(template_path, data):
         doc.save(bio)
         return bio.getvalue()
     except Exception as e:
-        st.error(f"Doc Generation Error: {e}"); return None
+        st.error(f"Doc Error: {e}"); return None
 
 # --- 2. MAIN UI ---
-st.set_page_config(layout="wide", page_title="Railway PME System")
+st.set_page_config(layout="wide", page_title="PME Management System")
 df_emp = get_employees()
 
-# Session state file store karne ke liye
 if 'pme_file' not in st.session_state: st.session_state.pme_file = None
 
 tab1, tab2, tab3 = st.tabs(["📝 Generate PME Memo", "📊 PME History", "🛠 Update Database"])
@@ -103,17 +106,19 @@ with tab1:
         with st.form("pme_form"):
             c_date = st.date_input("Memo Date", value=datetime.now())
             
-            # Auto-calculate Age & Service
-            age, s_year, s_month = calculate_service_and_age(emp_data.get('Date of Birth'), emp_data.get('Date of Appointment'))
+            # DB fields matching: DOB, DOA, FATHER'S NAME, Medical category
+            dob_val = emp_data.get('DOB', '')
+            doa_val = emp_data.get('DOA', '')
+            age, s_year, s_month = calculate_service_and_age(dob_val, doa_val)
             
             pme_vals = {
-                "dob": emp_data.get('Date of Birth', ''),
-                "doa": emp_data.get('Date of Appointment', ''),
+                "dob": dob_val,
+                "doa": doa_val,
                 "name": emp_data.get('Employee Name', ''),
                 "age": age,
-                "father_name": emp_data.get('Father Name', ''),
+                "father_name": emp_data.get("FATHER'S NAME", ''),
                 "designation": emp_data.get('Designation', ''),
-                "medical_category": emp_data.get('Medical Category', ''),
+                "medical_category": emp_data.get('Medical category', ''),
                 "current_date": c_date.strftime("%d/%m/%Y"),
                 "first_physical_mark": emp_data.get('Physical Mark 1', 'N/A'),
                 "second_physical_mark": emp_data.get('Physical Mark 2', 'N/A'),
@@ -127,26 +132,36 @@ with tab1:
             if st.form_submit_button("Generate Memo"):
                 out = generate_pme_docx(TEMPLATE_PATH, pme_vals)
                 if out:
+                    # Save history to DB
+                    db.collection("pme_history").add({**pme_vals, "Timestamp": datetime.now(), "HRMS_ID": h_id})
                     st.session_state.pme_file = out
-                    st.success("✅ Memo Taiyar hai! Niche se download karein.")
+                    st.success("✅ Memo Generated!")
 
         if st.session_state.pme_file:
             st.download_button("📥 Download PME Memo", st.session_state.pme_file, f"PME_{h_id}.docx")
-    else: st.warning("Database khali hai.")
+
+with tab2:
+    st.header("📊 PME Generation History")
+    df_h = get_pme_history()
+    if not df_h.empty:
+        # Displaying key columns from history
+        st.dataframe(df_h[['Timestamp', 'name', 'designation', 'current_date', 'last_examined_date']], use_container_width=True)
+    else:
+        st.info("Abhi tak koi memo generate nahi hua hai.")
 
 with tab3:
-    st.header("🛠 Update Employee PME & Physical Marks")
+    st.header("🛠 Update Employee Data")
     if not df_emp.empty:
-        t_sel = st.selectbox("Select Employee to Update", emp_list, key="upd_main")
+        t_sel = st.selectbox("Select Employee to Update", emp_list, key="upd_pme_final")
         t_id = t_sel.split('(')[-1].strip(')')
         t_row = df_emp[df_emp['HRMS ID'] == t_id].iloc[0]
         
-        with st.form("update_db_form"):
+        with st.form("final_upd_form"):
             col1, col2 = st.columns(2)
             m1 = col1.text_input("Physical Mark 1", t_row.get('Physical Mark 1', ''))
             m2 = col2.text_input("Physical Mark 2", t_row.get('Physical Mark 2', ''))
-            lp_date = st.text_input("Last PME Date (DD/MM/YYYY)", t_row.get('Last PME', ''))
-            lp_place = st.text_input("Last PME Place", t_row.get('Last PME Place', 'NKJ'))
+            lp_date = st.text_input("Last Examination Date (DD/MM/YYYY)", t_row.get('Last PME', ''))
+            lp_place = st.text_input("Last Examination Place", t_row.get('Last PME Place', 'NKJ'))
             
             if st.form_submit_button("Save to Database"):
                 db.collection("employees").document(t_row['id']).update({
