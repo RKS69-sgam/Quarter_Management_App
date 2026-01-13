@@ -57,28 +57,22 @@ def calculate_age_and_service(dob_val, doa_val):
     return age_str, s_year, s_month
 
 def replace_text_logic(doc, data):
-    # Paragraphs replacement
-    for p in doc.paragraphs:
+    # Paragraphs aur Tables dono ke liye ek hi logic
+    items = list(doc.paragraphs)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                items.extend(list(cell.paragraphs))
+    
+    for p in items:
         for key, value in data.items():
-            placeholder = "{{ " + key + " }}"
+            placeholder = "{{ " + str(key) + " }}"
             if placeholder in p.text:
                 full_text = "".join(run.text for run in p.runs)
                 if placeholder in full_text:
                     new_text = full_text.replace(placeholder, str(value))
                     for i, run in enumerate(p.runs):
                         run.text = new_text if i == 0 else ""
-    # Tables replacement (DOB/DOA logic)
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs:
-                    for key, value in data.items():
-                        placeholder = "{{ " + key + " }}"
-                        if placeholder in p.text:
-                            full_text = "".join(run.text for run in p.runs)
-                            new_text = full_text.replace(placeholder, str(value))
-                            for i, run in enumerate(p.runs):
-                                run.text = new_text if i == 0 else ""
 
 def generate_pme_docx(template_path, data):
     if not os.path.exists(template_path):
@@ -95,6 +89,12 @@ def generate_pme_docx(template_path, data):
 # --- 2. UI ---
 st.set_page_config(layout="wide", page_title="PME Management")
 df_emp = get_employees()
+
+# Session state download ke liye
+if 'pme_download_data' not in st.session_state:
+    st.session_state.pme_download_data = None
+if 'pme_download_name' not in st.session_state:
+    st.session_state.pme_download_name = ""
 
 tab1, tab2, tab3 = st.tabs(["📝 Generate PME Memo", "📊 PME History", "🛠 Update Database"])
 
@@ -132,25 +132,37 @@ with tab1:
                 out = generate_pme_docx(TEMPLATE_PATH, pme_vals)
                 if out:
                     db.collection("pme_history").add({**pme_vals, "Timestamp": datetime.now(), "HRMS_ID": h_id})
-                    st.download_button("📥 Download PME Memo", out, f"PME_{h_id}.docx")
+                    st.session_state.pme_download_data = out
+                    st.session_state.pme_download_name = f"PME_{h_id}.docx"
                     st.success(f"Generated! Age: {age_val}, Service: {s_yr}y {s_mn}m")
 
+        # DOWNLOAD BUTTON FORM KE BAHAR HONA CHAHIYE
+        if st.session_state.pme_download_data:
+            st.download_button(
+                label="📥 Download PME Memo",
+                data=st.session_state.pme_download_data,
+                file_name=st.session_state.pme_download_name,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+
 with tab2:
+    st.header("📊 History")
     df_h = get_pme_history()
     if not df_h.empty:
         st.dataframe(df_h[['Timestamp', 'name', 'current_date', 'age', 'service_year']], use_container_width=True)
 
 with tab3:
+    st.header("🛠 Database Update")
     if not df_emp.empty:
-        t_sel = st.selectbox("Select Employee", emp_list, key="upd")
+        t_sel = st.selectbox("Select Employee", emp_list, key="upd_pme")
         t_id = t_sel.split('(')[-1].strip(')')
         t_row = df_emp[df_emp['HRMS ID'] == t_id].iloc[0]
         with st.form("upd_f"):
-            m1 = st.text_input("Mark 1", t_row.get('Physical Mark 1', ''))
-            m2 = st.text_input("Mark 2", t_row.get('Physical Mark 2', ''))
-            lp_d = st.text_input("Last Exam Date", t_row.get('Last PME', ''))
-            lp_p = st.text_input("Last Place", t_row.get('Last PME Place', 'NKJ'))
-            if st.form_submit_button("Save"):
+            m1 = st.text_input("Physical Mark 1", t_row.get('Physical Mark 1', ''))
+            m2 = st.text_input("Physical Mark 2", t_row.get('Physical Mark 2', ''))
+            lp_d = st.text_input("Last PME Date", t_row.get('Last PME', ''))
+            lp_p = st.text_input("Last PME Place", t_row.get('Last PME Place', 'NKJ'))
+            if st.form_submit_button("Save Records"):
                 db.collection("employees").document(t_row['id']).update({
                     "Physical Mark 1": m1, "Physical Mark 2": m2,
                     "Last PME": lp_d, "Last PME Place": lp_p
