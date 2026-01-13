@@ -41,51 +41,47 @@ def get_pme_history():
     return pd.DataFrame(data) if data else pd.DataFrame()
 
 def calculate_age_and_service(dob_val, doa_val):
-    """Age (DOB se) aur Service (DOA se) ka sahi calculation logic"""
     now = datetime.now()
     age_str, s_year, s_month = "N/A", "0", "0"
-    
     try:
-        # Age Calculation from 'DOB'
         if dob_val and str(dob_val).lower() != 'nan':
-            # pd.to_datetime handles both strings and firebase timestamps
             dob_dt = pd.to_datetime(dob_val).to_pydatetime()
             age_str = str(relativedelta(now, dob_dt).years)
-            
-        # Service Calculation from 'DOA'
         if doa_val and str(doa_val).lower() != 'nan':
             doa_dt = pd.to_datetime(doa_val).to_pydatetime()
             diff = relativedelta(now, doa_dt)
             s_year = str(diff.years)
             s_month = str(diff.months)
-    except Exception as e:
-        st.warning(f"Calculation Error for Date: {e}")
-        
+    except:
+        pass
     return age_str, s_year, s_month
 
 def replace_text_logic(doc, data):
-    """Placeholder format: {{ key }} replacement logic"""
-    def replace_in_paragraphs(paragraphs):
-        for p in paragraphs:
-            for key, value in data.items():
-                [span_2](start_span)placeholder = "{{ " + key + " }}" # As per your template[span_2](end_span)
-                if placeholder in p.text:
-                    full_text = "".join(run.text for run in p.runs)
-                    if placeholder in full_text:
-                        new_text = full_text.replace(placeholder, str(value))
-                        # Clearing existing runs and setting new text to preserve font
-                        for i, run in enumerate(p.runs):
-                            run.text = new_text if i == 0 else ""
-
-    replace_in_paragraphs(doc.paragraphs)
+    # Paragraphs replacement
+    for p in doc.paragraphs:
+        for key, value in data.items():
+            placeholder = "{{ " + key + " }}"
+            if placeholder in p.text:
+                full_text = "".join(run.text for run in p.runs)
+                if placeholder in full_text:
+                    new_text = full_text.replace(placeholder, str(value))
+                    for i, run in enumerate(p.runs):
+                        run.text = new_text if i == 0 else ""
+    # Tables replacement (DOB/DOA logic)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                replace_in_paragraphs(cell.paragraphs)
+                for p in cell.paragraphs:
+                    for key, value in data.items():
+                        placeholder = "{{ " + key + " }}"
+                        if placeholder in p.text:
+                            full_text = "".join(run.text for run in p.runs)
+                            new_text = full_text.replace(placeholder, str(value))
+                            for i, run in enumerate(p.runs):
+                                run.text = new_text if i == 0 else ""
 
 def generate_pme_docx(template_path, data):
     if not os.path.exists(template_path):
-        st.error(f"Template missing: {template_path}")
         return None
     try:
         doc = Document(template_path)
@@ -93,19 +89,16 @@ def generate_pme_docx(template_path, data):
         bio = io.BytesIO()
         doc.save(bio)
         return bio.getvalue()
-    except Exception as e:
-        st.error(f"Doc Error: {e}"); return None
+    except:
+        return None
 
-# --- 2. MAIN UI ---
+# --- 2. UI ---
 st.set_page_config(layout="wide", page_title="PME Management")
 df_emp = get_employees()
-
-if 'pme_file' not in st.session_state: st.session_state.pme_file = None
 
 tab1, tab2, tab3 = st.tabs(["📝 Generate PME Memo", "📊 PME History", "🛠 Update Database"])
 
 with tab1:
-    st.header("PME Memo Generation")
     if not df_emp.empty:
         emp_list = df_emp.apply(lambda r: f"{r.get('Employee Name')} ({r.get('HRMS ID')})", axis=1).tolist()
         selected = st.selectbox("Select Employee", emp_list)
@@ -114,19 +107,14 @@ with tab1:
 
         with st.form("pme_form"):
             c_date = st.date_input("Memo Date", value=datetime.now())
-            
-            # [span_3](start_span)Extracting correct DB fields as per your collection[span_3](end_span)
-            dob = emp_data.get('DOB')
-            doa = emp_data.get('DOA')
-            
-            # Calculation call
-            age_calc, s_yr_calc, s_mn_calc = calculate_age_and_service(dob, doa)
+            dob, doa = emp_data.get('DOB'), emp_data.get('DOA')
+            age_val, s_yr, s_mn = calculate_age_and_service(dob, doa)
             
             pme_vals = {
                 "dob": str(dob) if dob else '',
                 "doa": str(doa) if doa else '',
                 "name": emp_data.get('Employee Name', ''),
-                "age": age_calc,
+                "age": age_val,
                 "father_name": emp_data.get("FATHER'S NAME", ''),
                 "designation": emp_data.get('Designation', ''),
                 "medical_category": emp_data.get('Medical category', ''),
@@ -136,49 +124,35 @@ with tab1:
                 "last_examined_date": emp_data.get('Last PME', 'N/A'),
                 "last_place": emp_data.get('Last PME Place', 'NKJ'),
                 "examiner": "ACMS/NKJ",
-                "service_year": s_yr_calc,
-                "service_month": s_mn_calc
+                "service_year": s_yr,
+                "service_month": s_mn
             }
 
             if st.form_submit_button("Generate Memo"):
                 out = generate_pme_docx(TEMPLATE_PATH, pme_vals)
                 if out:
-                    # [span_4](start_span)Save to history collection[span_4](end_span)
                     db.collection("pme_history").add({**pme_vals, "Timestamp": datetime.now(), "HRMS_ID": h_id})
-                    st.session_state.pme_file = out
-                    st.success(f"✅ Memo Generated! Age: {age_calc}, Service: {s_yr_calc}y {s_mn_calc}m")
-
-        if st.session_state.pme_file:
-            st.download_button("📥 Download PME Memo", st.session_state.pme_file, f"PME_{h_id}.docx")
-    else: st.warning("Database empty.")
+                    st.download_button("📥 Download PME Memo", out, f"PME_{h_id}.docx")
+                    st.success(f"Generated! Age: {age_val}, Service: {s_yr}y {s_mn}m")
 
 with tab2:
-    st.header("📊 PME History Record")
     df_h = get_pme_history()
     if not df_h.empty:
-        # [span_5](start_span)Displaying records from the 'pme_history' collection[span_5](end_span)
-        st.dataframe(df_h[['Timestamp', 'name', 'current_date', 'service_year', 'service_month']], use_container_width=True)
-    else:
-        st.info("No history records found.")
+        st.dataframe(df_h[['Timestamp', 'name', 'current_date', 'age', 'service_year']], use_container_width=True)
 
 with tab3:
-    st.header("🛠 Update Employee Data")
     if not df_emp.empty:
-        t_sel = st.selectbox("Select Employee", emp_list, key="upd_pme_final")
+        t_sel = st.selectbox("Select Employee", emp_list, key="upd")
         t_id = t_sel.split('(')[-1].strip(')')
         t_row = df_emp[df_emp['HRMS ID'] == t_id].iloc[0]
-        
-        with st.form("final_upd_form"):
-            col1, col2 = st.columns(2)
-            m1 = col1.text_input("Physical Mark 1", t_row.get('Physical Mark 1', ''))
-            m2 = col2.text_input("Physical Mark 2", t_row.get('Physical Mark 2', ''))
-            lp_date = st.text_input("Last Examination Date", t_row.get('Last PME', ''))
-            lp_place = st.text_input("Last Place", t_row.get('Last PME Place', 'NKJ'))
-            
-            if st.form_submit_button("Save Updates"):
+        with st.form("upd_f"):
+            m1 = st.text_input("Mark 1", t_row.get('Physical Mark 1', ''))
+            m2 = st.text_input("Mark 2", t_row.get('Physical Mark 2', ''))
+            lp_d = st.text_input("Last Exam Date", t_row.get('Last PME', ''))
+            lp_p = st.text_input("Last Place", t_row.get('Last PME Place', 'NKJ'))
+            if st.form_submit_button("Save"):
                 db.collection("employees").document(t_row['id']).update({
                     "Physical Mark 1": m1, "Physical Mark 2": m2,
-                    "Last PME": lp_date, "Last PME Place": lp_place
+                    "Last PME": lp_d, "Last PME Place": lp_p
                 })
-                st.success("✅ Database Updated!")
                 st.rerun()
