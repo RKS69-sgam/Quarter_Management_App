@@ -28,55 +28,53 @@ def check_login():
         return False
     return True
 
-# --- 1. Firebase Initialization (Error Fixed) ---
+# --- 1. Firebase Initialization ---
 @st.cache_resource
 def init_db():
     if not firebase_admin._apps:
         try:
-            # 1. Pehle Streamlit Secrets check karein (Cloud Deployment ke liye)
             if "firebase_config" in st.secrets:
                 cred_dict = dict(st.secrets["firebase_config"])
                 if isinstance(cred_dict.get('private_key'), str):
                     cred_dict['private_key'] = cred_dict['private_key'].replace('\\n', '\n')
                 cred = credentials.Certificate(cred_dict)
-            # 2. Agar secrets nahi hain, toh local JSON file check karein
             else:
                 json_path = 'sgamoffice-firebase-adminsdk-fbsvc-253915b05b.json'
-                if os.path.exists(json_path):
-                    cred = credentials.Certificate(json_path)
-                else:
-                    st.error("Firebase Key nahi mili! Secrets ya JSON file check karein.")
-                    st.stop()
-            
+                cred = credentials.Certificate(json_path)
             firebase_admin.initialize_app(cred)
         except Exception as e:
-            st.error(f"Firebase Error: {e}")
-            st.stop()
+            st.error(f"Firebase Error: {e}"); st.stop()
     return firestore.client()
 
-# --- 2. Table Logic ---
+# --- 2. Table Logic (Error Handled) ---
 def fill_bulk_template(doc, selected_data, report_date):
+    # Header Date Replace
     for p in doc.paragraphs:
         if "[Date]" in p.text:
-            p.text = p.text.replace("[Date]", report_date)
+            p.text = p.text.replace("[Date]", str(report_date))
 
     if not doc.tables:
+        st.error("Template mein koi table nahi mili!")
         return doc
     
-    table = doc.tables[-1] # Niche wali table pakadne ke liye
+    # SADAR PRESHIT ke baad wali table (Last Table)
+    table = doc.tables[-1] 
     num_cols = len(table.columns)
 
     for i, emp in enumerate(selected_data):
+        # Index 1 placeholders wali row hai (S.No 1 wali)
         if i == 0 and len(table.rows) >= 2:
             row_cells = table.rows[1].cells
         else:
             row_cells = table.add_row().cells
             
+        # str() wrap kiya gaya hai taaki TypeError na aaye
         if num_cols > 0: row_cells[0].text = str(i + 1)
-        if num_cols > 1: row_cells[1].text = emp['name']
-        if num_cols > 2: row_cells[2].text = emp['desig']
-        if num_cols > 3: row_cells[3].text = emp['pf']
+        if num_cols > 1: row_cells[1].text = str(emp.get('name', ''))
+        if num_cols > 2: row_cells[2].text = str(emp.get('desig', ''))
+        if num_cols > 3: row_cells[3].text = str(emp.get('pf', 'N/A')) # 'N/A' if None
         if num_cols > 4: row_cells[4].text = "कर्मचारी के विरूद्ध डी.ए.आर. एवं विजिलेंस केश लम्बित नहीं है"
+            
     return doc
 
 # --- 3. Main App ---
@@ -90,7 +88,6 @@ def main():
 
     db = init_db()
     
-    # Paths setup
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     TEMPLATE_PATH = os.path.join(BASE_DIR, "assets", "DAR NOC temp.docx")
 
@@ -101,6 +98,7 @@ def main():
     tab1, tab2 = st.tabs(["📝 Generate Joint NOC", "📊 Records History"])
 
     with tab1:
+        st.header("Bulk DAR NOC Generation")
         if not df_emp.empty:
             emp_options = df_emp.apply(lambda r: f"{r.get('Employee Name')} ({r.get('HRMS ID')})", axis=1).tolist()
             selected_names = st.multiselect("Select Staff", emp_options)
@@ -116,10 +114,11 @@ def main():
                     for name_str in selected_names:
                         h_id = name_str.split('(')[-1].strip(')')
                         row = df_emp[df_emp['HRMS ID'] == h_id].iloc[0]
+                        # Safe extraction to avoid NoneType
                         selected_data.append({
-                            "name": row.get('Employee Name', ''),
-                            "desig": row.get('Designation', ''),
-                            "pf": row.get('PF Number', h_id)
+                            "name": str(row.get('Employee Name', '')),
+                            "desig": str(row.get('Designation', '')),
+                            "pf": str(row.get('PF Number') if row.get('PF Number') else h_id)
                         })
                     
                     doc = Document(TEMPLATE_PATH)
@@ -128,7 +127,7 @@ def main():
                     buf = io.BytesIO()
                     filled_doc.save(buf)
                     
-                    # History entry
+                    # Save History
                     for emp in selected_data:
                         db.collection("dar_history").add({
                             "Employee Name": emp['name'],
@@ -137,8 +136,8 @@ def main():
                             "Type": "Joint NOC"
                         })
                     
-                    st.success("✅ NOC Taiyar!")
-                    st.download_button("📥 Download", buf.getvalue(), f"NOC_{datetime.now().strftime('%d%m%Y')}.docx")
+                    st.success("✅ NOC Generated Successfully!")
+                    st.download_button("📥 Download Document", buf.getvalue(), f"NOC_{datetime.now().strftime('%d%m%Y')}.docx")
         else:
             st.warning("Database khali hai.")
 
