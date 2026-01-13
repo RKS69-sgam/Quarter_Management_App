@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from docx import Document
+from docx.shared import Pt
 import io
 import os
 import firebase_admin
@@ -27,8 +28,7 @@ def init_db():
                 cred = credentials.Certificate('sgamoffice-firebase-adminsdk-fbsvc-253915b05b.json')
             firebase_admin.initialize_app(cred)
         except Exception as e:
-            st.error(f"Firebase Error: {e}")
-            st.stop()
+            st.error(f"Firebase Error: {e}"); st.stop()
     return firestore.client()
 
 db = init_db()
@@ -51,36 +51,46 @@ def calculate_service(doa_val):
             doa = datetime.combine(doa_val, datetime.min.time())
         diff = relativedelta(datetime.now(), doa)
         return diff.years, diff.months
-    except:
-        return 0, 0
+    except: return 0, 0
+
+def safe_replace(paragraphs, data):
+    """Font style barkaraar rakhne ke liye runs replacement"""
+    for p in paragraphs:
+        for key, value in data.items():
+            placeholder = "{{" + key + "}}"
+            if placeholder in p.text:
+                for run in p.runs:
+                    if placeholder in run.text:
+                        run.text = run.text.replace(placeholder, str(value))
+                # Double check for split placeholders
+                if placeholder in p.text:
+                    p.text = p.text.replace(placeholder, str(value))
 
 def generate_pme_docx(template_path, data):
     if not os.path.exists(template_path): return None
     try:
         doc = Document(template_path)
-        # [span_0](start_span)Placeholder mapping from[span_0](end_span)
+        # 1. Normal Paragraphs
+        safe_replace(doc.paragraphs, data)
+        # 2. Table Cells
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
-                    for key, value in data.items():
-                        p1, p2 = "{{ " + key + " }}", "{{" + key + "}}"
-                        if p1 in cell.text: cell.text = cell.text.replace(p1, str(value))
-                        if p2 in cell.text: cell.text = cell.text.replace(p2, str(value))
+                    safe_replace(cell.paragraphs, data)
+        
         bio = io.BytesIO()
         doc.save(bio)
         return bio.getvalue()
     except Exception as e:
-        st.error(f"Doc Error: {e}")
-        return None
+        st.error(f"Doc Error: {e}"); return None
 
-# --- 2. UI ---
+# --- 2. MAIN UI ---
 st.set_page_config(layout="wide", page_title="PME System")
 
-# Session state for file storage (Fix for Download Button)
 if 'pme_file' not in st.session_state: st.session_state.pme_file = None
 if 'pme_filename' not in st.session_state: st.session_state.pme_filename = ""
 
-tab1, tab2, tab3 = st.tabs(["📝 Generate PME Memo", "📊 PME Records", "🛠 Update Marks"])
+tab1, tab2, tab3 = st.tabs(["📝 Generate PME Memo", "📊 PME Records", "🛠 Update PME"])
 df_emp = get_employees()
 
 with tab1:
@@ -96,7 +106,7 @@ with tab1:
             doa = emp_data.get('Date of Appointment', '')
             s_year, s_month = calculate_service(doa)
             
-            pme_data = {
+            pme_vals = {
                 "name": emp_data.get('Employee Name', ''),
                 "age": emp_data.get('Age', ''),
                 "father_name": emp_data.get('Father Name', ''),
@@ -107,48 +117,50 @@ with tab1:
                 "current_date": c_date.strftime("%d/%m/%Y"),
                 "first_physical_mark": emp_data.get('Physical Mark 1', 'N/A'),
                 "second_physical_mark": emp_data.get('Physical Mark 2', 'N/A'),
-                "last_examined_date": emp_data.get('Last PME', 'N/A'), # From DB
-                "last_place": "NKJ", "examiner": "ACMS/NKJ",
-                "service_year": s_year, "service_month": s_month
+                "last_examined_date": emp_data.get('Last PME', 'N/A'),
+                "last_place": emp_data.get('Last PME Place', 'NKJ'),
+                "examiner": "ACMS/NKJ",
+                "service_year": s_year,
+                "service_month": s_month
             }
 
             if st.form_submit_button("Generate Memo"):
-                out = generate_pme_docx(TEMPLATE_PATH, pme_data)
+                out = generate_pme_docx(TEMPLATE_PATH, pme_vals)
                 if out:
-                    # History save
-                    db.collection(PME_HISTORY_COLLECTION).add({**pme_data, "Timestamp": datetime.now(), "HRMS_ID": h_id})
-                    # Save to session state
+                    db.collection(PME_HISTORY_COLLECTION).add({**pme_vals, "Timestamp": datetime.now(), "HRMS_ID": h_id})
                     st.session_state.pme_file = out
                     st.session_state.pme_filename = f"PME_{h_id}.docx"
-                    st.success("✅ Memo Taiyar hai! Niche se download karein.")
+                    st.success("✅ Memo Generated!")
 
-        # Download Button form ke BAHAR
         if st.session_state.pme_file:
-            st.download_button(
-                label="📥 Download Generated Memo",
-                data=st.session_state.pme_file,
-                file_name=st.session_state.pme_filename,
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
-    else:
-        st.warning("Database empty.")
+            st.download_button("📥 Download PME Memo", st.session_state.pme_file, st.session_state.pme_filename)
+    else: st.warning("No data found.")
 
-# (Tab 2 & 3 logic remain same)
 with tab2:
     st.header("📊 History")
     df_h = get_pme_history()
     if not df_h.empty: st.dataframe(df_h[['Timestamp', 'name', 'current_date', 'last_examined_date']], use_container_width=True)
 
 with tab3:
-    st.header("🛠 Update")
+    st.header("🛠 Update PME & Employee Details")
     if not df_emp.empty:
-        t_sel = st.selectbox("Select to Update", emp_list)
+        t_sel = st.selectbox("Select Employee to Update", emp_list, key="upd_sel")
         t_id = t_sel.split('(')[-1].strip(')')
         t_row = df_emp[df_emp['HRMS ID'] == t_id].iloc[0]
-        with st.form("upd_f"):
-            m1 = st.text_input("Mark 1", t_row.get('Physical Mark 1', ''))
-            m2 = st.text_input("Mark 2", t_row.get('Physical Mark 2', ''))
-            lp = st.text_input("Last PME", t_row.get('Last PME', ''))
-            if st.form_submit_button("Save"):
-                db.collection(EMP_COLLECTION).document(t_row['id']).update({"Physical Mark 1": m1, "Physical Mark 2": m2, "Last PME": lp})
-                st.success("Updated!")
+        
+        with st.form("update_pme_form"):
+            col1, col2 = st.columns(2)
+            m1 = col1.text_input("Physical Mark 1", t_row.get('Physical Mark 1', ''))
+            m2 = col2.text_input("Physical Mark 2", t_row.get('Physical Mark 2', ''))
+            
+            st.subheader("PME Completion Update")
+            last_date = st.text_input("Last Examination Date (DD/MM/YYYY)", t_row.get('Last PME', ''))
+            last_place = st.text_input("Examination Place", t_row.get('Last PME Place', 'NKJ'))
+            
+            if st.form_submit_button("Update Database"):
+                db.collection(EMP_COLLECTION).document(t_row['id']).update({
+                    "Physical Mark 1": m1, "Physical Mark 2": m2,
+                    "Last PME": last_date, "Last PME Place": last_place
+                })
+                st.success("✅ Records updated in Database!")
+                st.rerun()
