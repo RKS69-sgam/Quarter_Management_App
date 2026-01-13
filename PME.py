@@ -8,7 +8,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from dateutil.relativedelta import relativedelta
 
-# --- 0. PATH & DATABASE SETUP ---
+# --- 0. Setup ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_PATH = os.path.join(BASE_DIR, "assets", "pme memo temp.docx")
 
@@ -30,7 +30,7 @@ def init_db():
 
 db = init_db()
 
-# --- 1. CORE UTILITIES ---
+# --- 1. Utilities ---
 def get_employees():
     docs = db.collection("employees").stream()
     return pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in docs])
@@ -41,25 +41,25 @@ def get_pme_history():
     return pd.DataFrame(data) if data else pd.DataFrame()
 
 def calculate_age_and_service(dob_val, doa_val):
-    """Age (DOB se) aur Service (DOA se) calculate karne ka logic"""
+    """Age (DOB se) aur Service (DOA se) ka sahi calculation logic"""
     now = datetime.now()
     age_str, s_year, s_month = "N/A", "0", "0"
     
     try:
-        # Age Calculation from DOB
+        # Age Calculation from 'DOB'
         if dob_val and str(dob_val).lower() != 'nan':
-            # convert to datetime object
+            # pd.to_datetime handles both strings and firebase timestamps
             dob_dt = pd.to_datetime(dob_val).to_pydatetime()
             age_str = str(relativedelta(now, dob_dt).years)
             
-        # Service Calculation from DOA
+        # Service Calculation from 'DOA'
         if doa_val and str(doa_val).lower() != 'nan':
             doa_dt = pd.to_datetime(doa_val).to_pydatetime()
             diff = relativedelta(now, doa_dt)
             s_year = str(diff.years)
             s_month = str(diff.months)
     except Exception as e:
-        print(f"Calculation Error: {e}")
+        st.warning(f"Calculation Error for Date: {e}")
         
     return age_str, s_year, s_month
 
@@ -68,12 +68,12 @@ def replace_text_logic(doc, data):
     def replace_in_paragraphs(paragraphs):
         for p in paragraphs:
             for key, value in data.items():
-                placeholder = "{{ " + key + " }}"
+                [span_2](start_span)placeholder = "{{ " + key + " }}" # As per your template[span_2](end_span)
                 if placeholder in p.text:
-                    # Formatting preserve karne ke liye runs use karein
                     full_text = "".join(run.text for run in p.runs)
                     if placeholder in full_text:
                         new_text = full_text.replace(placeholder, str(value))
+                        # Clearing existing runs and setting new text to preserve font
                         for i, run in enumerate(p.runs):
                             run.text = new_text if i == 0 else ""
 
@@ -115,11 +115,11 @@ with tab1:
         with st.form("pme_form"):
             c_date = st.date_input("Memo Date", value=datetime.now())
             
-            # Database fields as requested
+            # [span_3](start_span)Extracting correct DB fields as per your collection[span_3](end_span)
             dob = emp_data.get('DOB')
             doa = emp_data.get('DOA')
             
-            # YAHAN AGE AUR SERVICE CALCULATION HO RAHA HAI
+            # Calculation call
             age_calc, s_yr_calc, s_mn_calc = calculate_age_and_service(dob, doa)
             
             pme_vals = {
@@ -143,18 +143,23 @@ with tab1:
             if st.form_submit_button("Generate Memo"):
                 out = generate_pme_docx(TEMPLATE_PATH, pme_vals)
                 if out:
+                    # [span_4](start_span)Save to history collection[span_4](end_span)
                     db.collection("pme_history").add({**pme_vals, "Timestamp": datetime.now(), "HRMS_ID": h_id})
                     st.session_state.pme_file = out
                     st.success(f"✅ Memo Generated! Age: {age_calc}, Service: {s_yr_calc}y {s_mn_calc}m")
 
         if st.session_state.pme_file:
             st.download_button("📥 Download PME Memo", st.session_state.pme_file, f"PME_{h_id}.docx")
+    else: st.warning("Database empty.")
 
 with tab2:
     st.header("📊 PME History Record")
     df_h = get_pme_history()
     if not df_h.empty:
+        # [span_5](start_span)Displaying records from the 'pme_history' collection[span_5](end_span)
         st.dataframe(df_h[['Timestamp', 'name', 'current_date', 'service_year', 'service_month']], use_container_width=True)
+    else:
+        st.info("No history records found.")
 
 with tab3:
     st.header("🛠 Update Employee Data")
