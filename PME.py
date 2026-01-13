@@ -55,7 +55,7 @@ def replace_text_logic(doc, data):
     def replace_in_paragraphs(paragraphs):
         for p in paragraphs:
             for key, value in data.items():
-                placeholder = "{{" + key + "}}"
+                placeholder = "{{ " + key + " }}"
                 if placeholder in p.text:
                     # Runs ko merge karke replace karna taaki formatting na bigde
                     full_text = "".join(run.text for run in p.runs)
