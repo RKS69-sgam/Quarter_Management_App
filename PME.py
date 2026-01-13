@@ -90,12 +90,12 @@ with tab1:
 
         with st.form("pme_form"):
             c_date = st.date_input("Memo Date", value=datetime.now())
-            s_year, s_month = calculate_service(emp_data.get('Date of Appointment'))
+            s_year, s_month = calculate_service(emp_data.get('DOA'))
             
             # [span_2](start_span)Template ke placeholders ke hisaab se mapping[span_2](end_span)
             pme_vals = {
-                "dob": emp_data.get('Date of Birth', ''),
-                "doa": emp_data.get('Date of Appointment', ''),
+                "dob": emp_data.get('DOB', ''),
+                "doa": emp_data.get('DOA', ''),
                 "name": emp_data.get('Employee Name', ''),
                 "age": emp_data.get('Age', ''),
                 "father_name": emp_data.get('Father Name', ''),
