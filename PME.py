@@ -8,8 +8,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from dateutil.relativedelta import relativedelta
 
-# --- 0. Path aur Firebase Setup ---
-# BASE_DIR ko yahan define kiya gaya hai taaki NameError na aaye
+# --- 0. Path & Firebase Setup ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_PATH = os.path.join(BASE_DIR, "assets", "pme memo temp.docx")
 
@@ -26,55 +25,43 @@ def init_db():
                 cred = credentials.Certificate('sgamoffice-firebase-adminsdk-fbsvc-253915b05b.json')
             firebase_admin.initialize_app(cred)
         except Exception as e:
-            st.error(f"Firebase Error: {e}")
-            return None
+            st.error(f"Firebase Error: {e}"); return None
     return firestore.client()
 
 db = init_db()
 
-# --- 1. Date aur Calculation Logic (Fixed for N/A Issue) ---
+# --- 1. Robust Utilities ---
 def get_safe_date(date_val):
-    """Har tarah ke date format ko datetime object mein badalne ke liye"""
     if not date_val or str(date_val).lower() == 'nan' or date_val == "":
         return None
     try:
-        # Agar Firebase Timestamp hai
         if hasattr(date_val, 'to_datetime'):
             return date_val.to_datetime().replace(tzinfo=None)
-        # Agar string hai toh use parse karein
         return pd.to_datetime(date_val).to_pydatetime().replace(tzinfo=None)
-    except:
-        return None
+    except: return None
 
 def calculate_pme_metrics(dob_raw, doa_raw):
     now = datetime.now()
     res = {"age": "N/A", "s_yr": "0", "s_mn": "0", "dob_f": "", "doa_f": ""}
-    
     dt_dob = get_safe_date(dob_raw)
     dt_doa = get_safe_date(doa_raw)
-    
     if dt_dob:
         res["age"] = str(relativedelta(now, dt_dob).years)
         res["dob_f"] = dt_dob.strftime("%d/%m/%Y")
-    
     if dt_doa:
         diff = relativedelta(now, dt_doa)
         res["s_yr"] = str(diff.years)
         res["s_mn"] = str(diff.months)
         res["doa_f"] = dt_doa.strftime("%d/%m/%Y")
-        
     return res
 
-# --- 2. Word Document Replacement Logic ---
 def replace_placeholders(doc, mapping):
-    # Paragraphs aur Tables dono cover honge
-    target_paras = list(doc.paragraphs)
+    all_paras = list(doc.paragraphs)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                target_paras.extend(cell.paragraphs)
-                
-    for p in target_paras:
+                all_paras.extend(cell.paragraphs)
+    for p in all_paras:
         for key, val in mapping.items():
             placeholder = "{{ " + str(key) + " }}"
             if placeholder in p.text:
@@ -84,17 +71,16 @@ def replace_placeholders(doc, mapping):
                     for i, run in enumerate(p.runs):
                         run.text = new_text if i == 0 else ""
 
-# --- 3. Streamlit UI ---
-st.set_page_config(layout="wide", page_title="PME Management")
+# --- 2. Main Interface ---
+st.set_page_config(layout="wide", page_title="Railway PME System")
 
 if db is not None:
-    # Employees fetch karein
     docs = db.collection("employees").stream()
     df_emp = pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in docs])
 
     if 'memo_bytes' not in st.session_state: st.session_state.memo_bytes = None
 
-    tab1, tab2, tab3 = st.tabs(["📝 Generate PME Memo", "📊 History", "🛠 Update"])
+    tab1, tab2, tab3 = st.tabs(["📝 Generate PME Memo", "📊 History", "🛠 Update Database"])
 
     with tab1:
         if not df_emp.empty:
@@ -105,13 +91,10 @@ if db is not None:
 
             with st.form("pme_gen_form"):
                 memo_date = st.date_input("Memo Date", value=datetime.now())
-                
-                # Sahi Metrics Calculate karein
                 m = calculate_pme_metrics(emp_data.get('DOB'), emp_data.get('DOA'))
                 
                 final_mapping = {
-                    "dob": m["dob_f"],
-                    "doa": m["doa_f"],
+                    "dob": m["dob_f"], "doa": m["doa_f"],
                     "name": emp_data.get('Employee Name', ''),
                     "age": m["age"],
                     "father_name": emp_data.get("FATHER'S NAME", ''),
@@ -121,10 +104,9 @@ if db is not None:
                     "first_physical_mark": emp_data.get('Physical Mark 1', 'N/A'),
                     "second_physical_mark": emp_data.get('Physical Mark 2', 'N/A'),
                     "last_examined_date": emp_data.get('Last PME', 'N/A'),
-                    "last_place": emp_data.get('Last PME Place', 'NKJ'),
-                    "examiner": "ACMS/NKJ",
-                    "service_year": m["s_yr"],
-                    "service_month": m["s_mn"]
+                    "last_place": emp_data.get('Last PME Place', 'N/A'),
+                    "examiner": emp_data.get('Last Examiner', 'ACMS/NKJ'), # Previous Examiner placeholder
+                    "service_year": m["s_yr"], "service_month": m["s_mn"]
                 }
 
                 if st.form_submit_button("Generate Memo"):
@@ -134,22 +116,42 @@ if db is not None:
                         buf = io.BytesIO()
                         doc.save(buf)
                         st.session_state.memo_bytes = buf.getvalue()
-                        # History mein save karein
                         db.collection("pme_history").add({**final_mapping, "Timestamp": datetime.now(), "HRMS_ID": h_id})
-                        st.success(f"✅ Generated! Age: {m['age']}, Service: {m['s_yr']}y {m['s_mn']}m")
-                    else:
-                        st.error(f"Template nahi mila: {TEMPLATE_PATH}")
+                        st.success("✅ Document Generated!")
+                    else: st.error("Template Not Found!")
 
             if st.session_state.memo_bytes:
                 st.download_button("📥 Download PME Memo", st.session_state.memo_bytes, f"PME_{h_id}.docx")
-        else:
-            st.warning("Database khali hai.")
+        else: st.warning("Database Khali Hai.")
 
     with tab2:
-        st.header("History Records")
-        h_docs = db.collection("pme_history").order_by("Timestamp", direction=firestore.Query.DESCENDING).limit(20).stream()
+        st.header("Recent Generations")
+        h_docs = db.collection("pme_history").order_by("Timestamp", direction=firestore.Query.DESCENDING).limit(10).stream()
         h_list = [{**d.to_dict()} for d in h_docs]
-        if h_list:
-            st.dataframe(pd.DataFrame(h_list)[['Timestamp', 'name', 'age', 'service_year']], use_container_width=True)
-else:
-    st.error("Database connection fail ho gaya.")
+        if h_list: st.dataframe(pd.DataFrame(h_list)[['Timestamp', 'name', 'age', 'service_year']], use_container_width=True)
+
+    with tab3:
+        st.header("🛠 Update Employee Medical Data")
+        if not df_emp.empty:
+            t_sel = st.selectbox("Select Employee to Update", emp_names, key="upd_pme_final")
+            t_id = t_sel.split('(')[-1].strip(')')
+            t_row = df_emp[df_emp['HRMS ID'] == t_id].iloc[0]
+            
+            with st.form("medical_update_form"):
+                col1, col2 = st.columns(2)
+                m1 = col1.text_input("Physical Mark 1", t_row.get('Physical Mark 1', ''))
+                m2 = col2.text_input("Physical Mark 2", t_row.get('Physical Mark 2', ''))
+                lp_date = col1.text_input("Last PME Date (DD/MM/YYYY)", t_row.get('Last PME', ''))
+                lp_cat = col2.text_input("Last Medical Category", t_row.get('Medical category', ''))
+                lp_place = col1.text_input("Last PME Place", t_row.get('Last PME Place', ''))
+                lp_exam = col2.text_input("Last Examiner", t_row.get('Last Examiner', 'ACMS/NKJ'))
+                
+                if st.form_submit_button("Save & Update Records"):
+                    db.collection("employees").document(t_row['id']).update({
+                        "Physical Mark 1": m1, "Physical Mark 2": m2,
+                        "Last PME": lp_date, "Medical category": lp_cat,
+                        "Last PME Place": lp_place, "Last Examiner": lp_exam
+                    })
+                    st.success("✅ Employee Data Updated Successfully!")
+                    st.rerun()
+else: st.error("Database Connection Failed.")
