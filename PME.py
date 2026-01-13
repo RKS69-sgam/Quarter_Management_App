@@ -121,7 +121,7 @@ if db is not None:
                     else: st.error("Template Not Found!")
 
             if st.session_state.memo_bytes:
-                st.download_button("📥 Download PME Memo", st.session_state.memo_bytes, f"PME_{h_id}.docx")
+                st.download_button("📥 Download PME Memo", st.session_state.memo_bytes, f"PME_{emp_data.get('Employee Name', '')}.docx")
         else: st.warning("Database Khali Hai.")
 
     with tab2:
