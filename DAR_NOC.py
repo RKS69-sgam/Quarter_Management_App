@@ -7,52 +7,66 @@ import os
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# --- Login & Setup ---
+# --- 0. Configuration & Login ---
 ADMIN_USER = "admin"
 ADMIN_PASS = "Sgam@4321"
 
 def check_login():
-    if "logged_in" not in st.session_state: st.session_state.logged_in = False
+    if "logged_in" not in st.session_state:
+        st.session_state.logged_in = False
     if not st.session_state.logged_in:
         st.title("🔐 Railway DAR System Login")
-        with st.form("login"):
-            u, p = st.text_input("Username"), st.text_input("Password", type="password")
+        with st.form("login_form"):
+            user = st.text_input("Username")
+            pas = st.text_input("Password", type="password")
             if st.form_submit_button("Login"):
-                if u == ADMIN_USER and p == ADMIN_PASS:
+                if user == ADMIN_USER and pas == ADMIN_PASS:
                     st.session_state.logged_in = True
                     st.rerun()
-                else: st.error("Galat Credentials")
+                else:
+                    st.error("❌ Galat Username ya Password")
         return False
     return True
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TEMPLATE_PATH = os.path.join(BASE_DIR, "assets", "DAR NOC temp.docx")
-
+# --- 1. Firebase Initialization (Error Fixed) ---
 @st.cache_resource
 def init_db():
     if not firebase_admin._apps:
-        cred = credentials.Certificate('sgamoffice-firebase-adminsdk-fbsvc-253915b05b.json')
-        firebase_admin.initialize_app(cred)
+        try:
+            # 1. Pehle Streamlit Secrets check karein (Cloud Deployment ke liye)
+            if "firebase_config" in st.secrets:
+                cred_dict = dict(st.secrets["firebase_config"])
+                if isinstance(cred_dict.get('private_key'), str):
+                    cred_dict['private_key'] = cred_dict['private_key'].replace('\\n', '\n')
+                cred = credentials.Certificate(cred_dict)
+            # 2. Agar secrets nahi hain, toh local JSON file check karein
+            else:
+                json_path = 'sgamoffice-firebase-adminsdk-fbsvc-253915b05b.json'
+                if os.path.exists(json_path):
+                    cred = credentials.Certificate(json_path)
+                else:
+                    st.error("Firebase Key nahi mili! Secrets ya JSON file check karein.")
+                    st.stop()
+            
+            firebase_admin.initialize_app(cred)
+        except Exception as e:
+            st.error(f"Firebase Error: {e}")
+            st.stop()
     return firestore.client()
 
-# --- Table Target Logic (Fixed) ---
+# --- 2. Table Logic ---
 def fill_bulk_template(doc, selected_data, report_date):
-    # 1. Date Replace
     for p in doc.paragraphs:
         if "[Date]" in p.text:
             p.text = p.text.replace("[Date]", report_date)
 
-    # 2. Sahi Table Pakadna (Last Table)
     if not doc.tables:
-        st.error("Template mein table nahi mili!")
         return doc
     
-    # Aapke temp mein 'सादर प्रेषित है' ke baad wali table aamtaur par last table hoti hai
-    table = doc.tables[-1] 
+    table = doc.tables[-1] # Niche wali table pakadne ke liye
     num_cols = len(table.columns)
 
     for i, emp in enumerate(selected_data):
-        # Index 1 placeholders wali row hai (S.No 1 wali)
         if i == 0 and len(table.rows) >= 2:
             row_cells = table.rows[1].cells
         else:
@@ -63,43 +77,77 @@ def fill_bulk_template(doc, selected_data, report_date):
         if num_cols > 2: row_cells[2].text = emp['desig']
         if num_cols > 3: row_cells[3].text = emp['pf']
         if num_cols > 4: row_cells[4].text = "कर्मचारी के विरूद्ध डी.ए.आर. एवं विजिलेंस केश लम्बित नहीं है"
-            
     return doc
 
-# --- Main App ---
+# --- 3. Main App ---
 def main():
-    st.set_page_config(layout="wide")
+    st.set_page_config(layout="wide", page_title="DAR NOC Management")
     if not check_login(): return
 
+    if st.sidebar.button("🚪 Logout"):
+        st.session_state.logged_in = False
+        st.rerun()
+
     db = init_db()
+    
+    # Paths setup
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    TEMPLATE_PATH = os.path.join(BASE_DIR, "assets", "DAR NOC temp.docx")
+
+    # Data fetch
     docs = db.collection("employees").stream()
     df_emp = pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in docs])
 
-    tab1, tab2 = st.tabs(["📝 Generate NOC", "📊 History"])
+    tab1, tab2 = st.tabs(["📝 Generate Joint NOC", "📊 Records History"])
 
     with tab1:
         if not df_emp.empty:
-            emp_opts = df_emp.apply(lambda r: f"{r.get('Employee Name')} ({r.get('HRMS ID')})", axis=1).tolist()
-            selected = st.multiselect("Select Staff", emp_opts)
+            emp_options = df_emp.apply(lambda r: f"{r.get('Employee Name')} ({r.get('HRMS ID')})", axis=1).tolist()
+            selected_names = st.multiselect("Select Staff", emp_options)
             rep_date = st.date_input("NOC Date", value=datetime.now())
 
             if st.button("Generate Joint NOC"):
-                if not selected: st.warning("Staff chunein")
+                if not selected_names:
+                    st.warning("Staff select karein.")
+                elif not os.path.exists(TEMPLATE_PATH):
+                    st.error(f"Template nahi mila: {TEMPLATE_PATH}")
                 else:
                     selected_data = []
-                    for s in selected:
-                        h_id = s.split('(')[-1].strip(')')
+                    for name_str in selected_names:
+                        h_id = name_str.split('(')[-1].strip(')')
                         row = df_emp[df_emp['HRMS ID'] == h_id].iloc[0]
-                        selected_data.append({"name": row.get('Employee Name'), "desig": row.get('Designation'), "pf": row.get('PF Number', h_id)})
+                        selected_data.append({
+                            "name": row.get('Employee Name', ''),
+                            "desig": row.get('Designation', ''),
+                            "pf": row.get('PF Number', h_id)
+                        })
                     
                     doc = Document(TEMPLATE_PATH)
                     filled_doc = fill_bulk_template(doc, selected_data, rep_date.strftime("%d/%m/%Y"))
                     
                     buf = io.BytesIO()
                     filled_doc.save(buf)
-                    st.success("NOC Generated!")
+                    
+                    # History entry
+                    for emp in selected_data:
+                        db.collection("dar_history").add({
+                            "Employee Name": emp['name'],
+                            "PF Number": emp['pf'],
+                            "Generated_At": datetime.now(),
+                            "Type": "Joint NOC"
+                        })
+                    
+                    st.success("✅ NOC Taiyar!")
                     st.download_button("📥 Download", buf.getvalue(), f"NOC_{datetime.now().strftime('%d%m%Y')}.docx")
-        else: st.warning("DB Khali hai")
+        else:
+            st.warning("Database khali hai.")
+
+    with tab2:
+        st.header("📋 Recent DAR Records")
+        h_docs = db.collection("dar_history").order_by("Generated_At", direction=firestore.Query.DESCENDING).limit(50).stream()
+        h_list = [{**d.to_dict()} for d in h_docs]
+        if h_list:
+            st.dataframe(pd.DataFrame(h_list)[['Generated_At', 'Employee Name', 'PF Number']], use_container_width=True)
 
 if __name__ == "__main__":
     main()
