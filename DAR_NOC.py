@@ -158,7 +158,7 @@ def main():
                     st.download_button(
                         label="📥 Download Joint NOC (.docx)",
                         data=buf.getvalue(),
-                        file_name=f"Joint_NOC_{datetime.now().strftime('%d%m%Y')}.docx",
+                        file_name=f"DAR_NOC_{datetime.now().strftime('%d%m%Y')}.docx",
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     )
         else:
