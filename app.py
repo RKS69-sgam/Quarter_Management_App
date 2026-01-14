@@ -111,8 +111,8 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                 }
                 d_doc = generate_doc("Absent Duty letter temp", ctx)
                 s_doc = generate_doc("SF-11 temp", ctx)
-                if d_doc: st.download_button("⬇️ Duty Letter", d_doc, f"Duty_{ctx['PFNumber']}.docx")
-                if s_doc: st.download_button("⬇️ SF-11", s_doc, f"SF11_{ctx['PFNumber']}.docx")
+                if d_doc: st.download_button("⬇️ Duty Letter", d_doc, f"Duty_{ctx['EmployeeName']}.docx")
+                if s_doc: st.download_button("⬇️ SF-11", s_doc, f"SF11_{ctx['EmployeeName']}.docx")
                 db.collection("sf11_register").add({**ctx, "status": "Issued", "timestamp": datetime.now()})
 
     # --- TAB 2: OTHER SF-11 & ORDER ---
@@ -143,7 +143,7 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                     }
                     doc = generate_doc("SF-11 temp", ctx)
                     if doc:
-                        st.download_button("⬇️ Download SF-11", doc, f"SF11_{ctx['PFNumber']}.docx")
+                        st.download_button("⬇️ Download SF-11", doc, f"SF11_{ctx['EmployeeName']}.docx")
                         db.collection("sf11_register").add({**ctx, "status": "Issued", "timestamp": datetime.now()})
 
         elif mode == "दण्‍डादेश (Punishment Order)":
@@ -163,7 +163,7 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                         unit_extracted = str(match.iloc[0].get('Unit', ''))[:2]
                 
                 c1, c2 = st.columns(2)
-                dandadesh_no = c1.text_input("दण्‍डादेश क्रमांक", value=f"SGAM/NIP/{case['PFNumber']}")
+                dandadesh_no = c1.text_input("दण्‍डादेश क्रमांक", value=f"SGAM/NIP/{case['LetterNo']}")
                 order_date = c2.date_input("दण्‍डादेश दिनांक", value=date.today())
                 punishment_text = st.selectbox("दण्ड चुनें", ["आगामी देय एक वर्ष की वेतन वृद्धि असंचयी प्रभाव से अवरोधित किए जाने की शास्ति दी जाती है।", "आगामी देय एक वर्ष की वेतन वृद्धि संचयी प्रभाव से अवरोधित किए जाने की शास्ति दी जाती है।", "आगामी देय एक सेट सुविधा पास अवरोधित किए जाने की शास्ति दी जाती है।" , "आगामी देय एक सेट पीटीओ अवरोधित किए जाने की शास्ति दी जाती है।" ])
 
@@ -185,7 +185,7 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                             "OrderNo": dandadesh_no, "PunishmentDetails": punishment_text, "OrderDate": order_date.strftime('%d-%m-%Y'),
                             "status": "Closed"
                         })
-                        st.download_button("⬇️ Download NIP", doc_bio, f"NIP_{case['PFNumber']}.docx")
+                        st.download_button("⬇️ Download NIP", doc_bio, f"NIP_{case['EmployeeName']}.docx")
             else: st.warning("कोई पेंडिंग केस नहीं मिला।")
 
     # --- TAB 3: APPEAL PROCESS ---
@@ -220,7 +220,7 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
                             "status": "Appeal-Process"
                         })
                         st.success("स्टेटस 'Appeal-Process' अपडेट किया गया।")
-                        st.download_button("⬇️ Download Appeal Letter", doc, f"Appeal_{case['PFNumber']}.docx")
+                        st.download_button("⬇️ Download Appeal Letter", doc, f"Appeal_{case['EmployeeName']}.docx")
             else: st.info("अपील के लिए कोई 'Closed' केस नहीं मिला।")
 
         elif appeal_mode == "2. अपील निर्णय (Final Order & Close)":
@@ -279,6 +279,7 @@ if pwd == st.secrets.get("PASSWORD", "sgam@4321"):
 
 else:
     st.info("Side menu में पासवर्ड डालें।")
+
 
 
 
