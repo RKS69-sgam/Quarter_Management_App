@@ -167,7 +167,7 @@ with tab1:
             st.download_button(
                 label="📥 Download Sick Memo (DOCX)",
                 data=st.session_state.memo_docx,
-                file_name=f"Sick_Memo_{EmployeeName}.docx",
+                file_name=f"Sick_Memo_{'EmployeeName'}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
     else:
