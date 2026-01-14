@@ -148,7 +148,7 @@ with tab1:
                 if out:
                     for item in final_list: db.collection(NOC_HISTORY_COLLECTION).add(item)
                     st.success("Saved!")
-                    st.download_button("📥 Download", out, "Joint_Exam_NOC_{datetime.now().strftime('%d%m%Y')}.docx")
+                    st.download_button("📥 Download", out, "Joint_Exam_NOC_datetime.now().strftime('%d%m%Y').docx")
 
 with tab2:
     st.header("📊 History Report")
