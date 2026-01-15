@@ -12,6 +12,7 @@ from firebase_admin import credentials, firestore
 def init_db():
     if not firebase_admin._apps:
         try:
+            # First check for secrets, then local file
             if "firebase_config" in st.secrets:
                 cred = credentials.Certificate(dict(st.secrets["firebase_config"]))
             else:
@@ -21,31 +22,38 @@ def init_db():
             st.error(f"Firebase Error: {e}"); st.stop()
     return firestore.client()
 
-# --- 1. Admin Logic (Clean & Import) ---
-def clean_and_import(df):
+# --- 1. Admin Logic (Excel Import) ---
+def clean_and_import_excel(excel_file):
     db = init_db()
-    # Purana data delete karein
+    # 1. Purana data delete karein
     docs = db.collection("quarter_history").limit(500).stream()
     for doc in docs:
         doc.reference.delete()
     
-    # Naya data upload karein
+    # 2. Excel read karein (using openpyxl)
+    df = pd.read_excel(excel_file)
+    
+    count = 0
     for _, row in df.iterrows():
-        is_occ = True if str(row.get('Remark', '')).lower() == 'occupation' else False
+        # Remark 'Occupation' hai toh is_current True hoga
+        remark = str(row.get('Remark', '')).strip().lower()
+        is_occ = True if remark == 'occupation' else False
+        
         data = {
             "station": str(row.get('Station', '')),
             "quarter_number": str(row.get('Quarter Number', '')),
-            "pf_number": str(row.get('PF NUMBER', '')),
-            "hrms_id": str(row.get('HRMS ID', '')),
-            "employee_name": str(row.get('Employee Name', '')),
-            "allotment_date": pd.to_datetime(row['Occupation Date']).to_pydatetime() if pd.notna(row.get('Occupation Date')) else None,
-            "vacation_date": pd.to_datetime(row['Vacant Date']).to_pydatetime() if pd.notna(row.get('Vacant Date')) else None,
+            "pf_number": str(row.get('PF NUMBER', '')) if pd.notna(row.get('PF NUMBER')) else "",
+            "hrms_id": str(row.get('HRMS ID', '')) if pd.notna(row.get('HRMS ID')) else "",
+            "employee_name": str(row.get('Employee Name', '')) if pd.notna(row.get('Employee Name')) else "",
+            "allotment_date": row['Occupation Date'].to_pydatetime() if pd.notna(row.get('Occupation Date')) and hasattr(row['Occupation Date'], 'to_pydatetime') else None,
+            "vacation_date": row['Vacant Date'].to_pydatetime() if pd.notna(row.get('Vacant Date')) and hasattr(row['Vacant Date'], 'to_pydatetime') else None,
             "is_current": is_occ,
-            "designation": "", # Allotment ke samay employee collection se aayega
-            "unit": ""         # Allotment ke samay employee collection se aayega
+            "designation": "", # Employees collection se fetch hoga naye allotment par
+            "unit": ""
         }
         db.collection("quarter_history").add(data)
-    return len(df)
+        count += 1
+    return count
 
 # --- 2. Data Fetching ---
 @st.cache_data(ttl=60)
@@ -61,13 +69,19 @@ def get_history():
     for d in docs:
         item = d.to_dict()
         item['id'] = d.id
-        item['allot_disp'] = item['allotment_date'].strftime('%d-%m-%Y') if item.get('allotment_date') else "N/A"
-        item['vacat_disp'] = item['vacation_date'].strftime('%d-%m-%Y') if item.get('vacation_date') else ("Occupied" if item.get('is_current') else "Vacant")
+        # Formatting for UI display
+        item['allot_disp'] = item['allotment_date'].strftime('%d-%m-%Y') if item.get('allotment_date') and hasattr(item['allotment_date'], 'strftime') else "N/A"
+        
+        if item.get('is_current'):
+            item['vacat_disp'] = "🔴 Occupied"
+        else:
+            item['vacat_disp'] = item['vacation_date'].strftime('%d-%m-%Y') if item.get('vacation_date') and hasattr(item['vacation_date'], 'strftime') else "🟢 Vacant"
+        
         data.append(item)
     return pd.DataFrame(data)
 
-# --- 3. Docx Template Logic ---
-def fill_docx(temp_path, data, date_str):
+# --- 3. Docx Logic ---
+def fill_template(temp_path, data, date_str):
     doc = Document(temp_path)
     mapping = {
         "EMPLOYEE_NAME": str(data.get('employee_name', '')),
@@ -79,32 +93,35 @@ def fill_docx(temp_path, data, date_str):
         "UNIT": str(data.get('unit', '')),
         "DATE": date_str
     }
+    # Replace in Paragraphs and Tables
     for p in list(doc.paragraphs) + [p for t in doc.tables for r in t.rows for c in r.cells for p in c.paragraphs]:
         for k, v in mapping.items():
             if f"{{{{{k}}}}}" in p.text:
                 p.text = p.text.replace(f"{{{{{k}}}}}", v)
     return doc
 
-# --- 4. Main App Interface ---
+# --- 4. Main UI ---
 def main():
-    st.set_page_config(layout="wide", page_title="Railway Quarter MS")
+    st.set_page_config(layout="wide", page_title="Railway Quarter Management")
     db = init_db()
+    
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     ALLOT_TEMP = os.path.join(BASE_DIR, "assets", "Quarter_Allotment_Template.docx")
     VACATE_TEMP = os.path.join(BASE_DIR, "assets", "Quarter_Vacation_Template.docx")
 
-    # --- Sidebar Admin Tools ---
-    st.sidebar.header("⚙️ Admin Settings")
-    if st.sidebar.checkbox("Data Import/Clean"):
-        csv_file = st.sidebar.file_uploader("Upload Quarter CSV", type="csv")
-        if st.sidebar.button("🔥 Delete & Import"):
-            if csv_file:
-                df_new = pd.read_csv(csv_file)
-                count = clean_and_import(df_new)
-                st.sidebar.success(f"Successfully Imported {count} records!")
-                st.cache_data.clear()
-                st.rerun()
-            else: st.sidebar.error("Upload a file first")
+    # --- Sidebar Admin Tools (EXCEL IMPORT) ---
+    st.sidebar.header("🛠️ Admin Data Tools")
+    if st.sidebar.checkbox("Enable Excel Import/Clean"):
+        excel_file = st.sidebar.file_uploader("Upload 'Quarter Register.xlsx'", type=["xlsx"])
+        if st.sidebar.button("🔥 Clean & Import from Excel"):
+            if excel_file:
+                with st.spinner("Processing Excel Data..."):
+                    count = clean_and_import_excel(excel_file)
+                    st.sidebar.success(f"Cleaned & Imported {count} records!")
+                    st.cache_data.clear()
+                    st.rerun()
+            else:
+                st.sidebar.error("Kripya .xlsx file chunein")
 
     tab1, tab2, tab3 = st.tabs(["🏠 Allotment", "🗝️ Vacation", "📊 Master Report"])
 
@@ -113,77 +130,96 @@ def main():
 
     # --- TAB 1: ALLOTMENT ---
     with tab1:
-        st.header("New Allotment Form")
+        st.header("Quarter Allotment Form")
         if not df_emp.empty and not df_hist.empty:
-            emp_list = df_emp.apply(lambda r: f"{r.get('Employee Name')} ({r.get('HRMS ID')})", axis=1).tolist()
-            sel_emp = st.selectbox("Select Employee", emp_list)
+            # Employee selection
+            emp_options = df_emp.apply(lambda r: f"{r.get('Employee Name')} ({r.get('HRMS ID')})", axis=1).tolist()
+            sel_emp_str = st.selectbox("Staff Chunein", emp_options)
             
-            # Khali Quarter Filter
-            occ_q = df_hist[df_hist['is_current'] == True]['quarter_number'].tolist()
-            vacant_q = [q for q in df_hist['quarter_number'].unique() if q not in occ_q]
+            # Khali Quarter Filter Logic
+            occ_q_list = df_hist[df_hist['is_current'] == True]['quarter_number'].tolist()
+            all_q_list = sorted(df_hist['quarter_number'].unique().tolist())
+            vacant_q_list = [q for q in all_q_list if q not in occ_q_list]
             
-            c1, c2 = st.columns(2)
-            with c1: q_no = st.selectbox("Available Quarters", vacant_q)
-            with c2: stn = st.selectbox("Station", df_hist['station'].unique())
+            col1, col2 = st.columns(2)
+            with col1:
+                sel_q = st.selectbox("Khali Quarter (Vacant Only)", vacant_q_list)
+            with col2:
+                # Station selection (History se unique stations)
+                stn_list = sorted(df_hist['station'].unique().tolist())
+                sel_stn = st.selectbox("Station Name", stn_list)
             
-            a_date = st.date_input("Allotment Date", value=datetime.now())
+            a_date = st.date_input("Allotment Effective Date")
 
-            if st.button("Allot & Generate Letter"):
-                h_id = sel_emp.split('(')[-1].strip(')')
-                emp_row = df_emp[df_emp['HRMS ID'] == h_id].iloc[0]
+            if st.button("Allot & Generate Allotment Letter"):
+                h_id = sel_emp_str.split('(')[-1].strip(')')
+                emp_data = df_emp[df_emp['HRMS ID'] == h_id].iloc[0]
                 
-                allot_data = {
-                    "employee_name": emp_row.get('Employee Name'),
-                    "designation": emp_row.get('Designation'),
-                    "unit": emp_row.get('Unit', 'SSE/PW/SGAM'),
+                new_allot = {
+                    "employee_name": str(emp_data.get('Employee Name', '')),
+                    "designation": str(emp_data.get('Designation', '')), # Employee collection se
+                    "unit": str(emp_data.get('Unit', 'SSE/PW/SGAM')),   # Employee collection se
                     "hrms_id": h_id,
-                    "pf_number": emp_row.get('PF Number', ''),
-                    "quarter_number": q_no,
-                    "station": stn,
+                    "pf_number": str(emp_data.get('PF Number', '')),
+                    "quarter_number": sel_q,
+                    "station": sel_stn,
                     "allotment_date": datetime.combine(a_date, datetime.min.time()),
-                    "is_current": True
+                    "is_current": True,
+                    "vacation_date": None
                 }
-                db.collection("quarter_history").add(allot_data)
+                db.collection("quarter_history").add(new_allot)
                 st.cache_data.clear()
                 
-                doc = fill_doc(ALLOT_TEMP, allot_data, a_date.strftime("%d/%m/%Y"))
+                doc = fill_template(ALLOT_TEMP, new_allot, a_date.strftime("%d/%m/%Y"))
                 buf = io.BytesIO(); doc.save(buf)
-                st.success(f"Allotted {q_no}")
-                st.download_button("📥 Download Letter", buf.getvalue(), f"Allotment_{q_no}.docx")
+                st.success(f"Allotted {sel_q} to {new_allot['employee_name']}")
+                st.download_button("📥 Download Allotment Letter", buf.getvalue(), f"Allotment_{sel_q}.docx")
 
     # --- TAB 2: VACATION ---
     with tab2:
-        st.header("Vacation Form")
+        st.header("Quarter Vacation Form")
         if not df_hist.empty:
-            occ_only = df_hist[df_hist['is_current'] == True]
-            if not occ_only.empty:
-                v_sel = st.selectbox("Select Quarter", occ_only.apply(lambda r: f"{r['quarter_number']} - {r['employee_name']}", axis=1))
-                v_date = st.date_input("Vacation Date")
-                if st.button("Process Vacation"):
-                    q_row = occ_only.iloc[0] # logic based on selection
-                    db.collection("quarter_history").document(q_row['id']).update({
-                        "is_current": False, "vacation_date": datetime.combine(v_date, datetime.min.time())
+            occupied = df_hist[df_hist['is_current'] == True]
+            if not occupied.empty:
+                v_options = occupied.apply(lambda r: f"{r['quarter_number']} - {r['employee_name']}", axis=1).tolist()
+                sel_v_str = st.selectbox("Select Quarter to Vacate", v_options)
+                v_date = st.date_input("Vacation Effective Date")
+                
+                if st.button("Vacate & Generate Vacation Letter"):
+                    v_row = occupied.iloc[v_options.index(sel_v_str)]
+                    db.collection("quarter_history").document(v_row['id']).update({
+                        "is_current": False,
+                        "vacation_date": datetime.combine(v_date, datetime.min.time())
                     })
                     st.cache_data.clear()
-                    doc = fill_doc(VACATE_TEMP, q_row.to_dict(), v_date.strftime("%d/%m/%Y"))
+                    
+                    doc = fill_template(VACATE_TEMP, v_row.to_dict(), v_date.strftime("%d/%m/%Y"))
                     buf = io.BytesIO(); doc.save(buf)
-                    st.download_button("📥 Download Vacation Letter", buf.getvalue(), f"Vacation_{q_row['quarter_number']}.docx")
+                    st.success(f"Quarter {v_row['quarter_number']} marked as Vacant")
+                    st.download_button("📥 Download Vacation Letter", buf.getvalue(), f"Vacation_{v_row['quarter_number']}.docx")
+            else:
+                st.info("Abhi koi quarter occupied nahi hai.")
 
-    # --- TAB 3: REPORT ---
+    # --- TAB 3: MASTER REPORT ---
     with tab3:
-        st.header("📋 Master Quarter Database")
+        st.header("📊 Full Quarter History & Report")
         if not df_hist.empty:
-            st.metric("Total Occupied", len(df_hist[df_hist['is_current'] == True]))
+            # Stats Dashboard
+            c1, c2 = st.columns(2)
+            c1.metric("Total Quarters in Registry", len(df_hist['quarter_number'].unique()))
+            c2.metric("Currently Occupied", len(df_hist[df_hist['is_current'] == True]))
+
+            # Table for report
+            report_df = df_hist[['quarter_number', 'employee_name', 'station', 'allot_disp', 'vacat_disp', 'is_current']].copy()
+            report_df.columns = ['Quarter No', 'Employee Name', 'Station', 'Allotted On', 'Vacated On', 'Current Status']
             
-            # Report with Station
-            disp = df_hist[['quarter_number', 'employee_name', 'station', 'allot_disp', 'vacat_disp', 'is_current']].copy()
-            disp.columns = ['Quarter', 'Name', 'Station', 'Allotted', 'Vacated', 'Current Status']
+            st.dataframe(report_df, use_container_width=True)
             
-            st.dataframe(disp, use_container_width=True)
-            
-            # CSV with Station
-            csv = disp.to_csv(index=False).encode('utf-8-sig')
-            st.download_button("📥 Export CSV (Full History)", csv, "Quarter_Report.csv", "text/csv")
+            # CSV Download with Station
+            csv = report_df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button("📥 Download Master Report (CSV)", csv, "Quarter_Master_Report.csv", "text/csv")
+        else:
+            st.warning("Database khali hai. Sidebar se Excel import karein.")
 
 if __name__ == "__main__":
     main()
