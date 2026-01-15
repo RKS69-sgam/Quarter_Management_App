@@ -7,7 +7,7 @@ import os
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# --- 0. Configuration & Login ---
+# --- 0. Login Configuration ---
 ADMIN_USER = "admin"
 ADMIN_PASS = "Sgam@4321"
 
@@ -28,7 +28,7 @@ def check_login():
         return False
     return True
 
-# --- 1. Firebase Initialization ---
+# --- 1. Firebase Setup ---
 @st.cache_resource
 def init_db():
     if not firebase_admin._apps:
@@ -46,7 +46,7 @@ def init_db():
             st.error(f"Firebase Error: {e}"); st.stop()
     return firestore.client()
 
-# --- 2. Data Fetching with Caching (To save Quota) ---
+# --- 2. Data Fetching Logic (Optimized for Quota & Errors) ---
 @st.cache_data(ttl=300)
 def get_employees_cached():
     db = init_db()
@@ -54,40 +54,51 @@ def get_employees_cached():
     return pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in docs])
 
 def get_full_quarter_history():
+    """quarter_history collection se poora data fetch karna (Headers & Data)"""
     db = init_db()
-    docs = db.collection("quarter_history").order_by("Allotment_Date", direction=firestore.Query.DESCENDING).stream()
-    data = []
-    for d in docs:
-        item = d.to_dict()
-        item['id'] = d.id
-        # Formatting dates for DataFrame display
-        if item.get('Allotment_Date'):
-            item['Allotment_Date_Disp'] = item['Allotment_Date'].strftime('%d-%m-%Y')
-        if item.get('Vacation_Date'):
-            item['Vacation_Date_Disp'] = item['Vacation_Date'].strftime('%d-%m-%Y')
-        else:
-            item['Vacation_Date_Disp'] = "Occupied"
-        data.append(item)
-    return pd.DataFrame(data)
+    try:
+        # Bina order_by ke stream kar rahe hain taaki missing fields error na dein
+        docs = db.collection("quarter_history").stream()
+        data = []
+        for d in docs:
+            item = d.to_dict()
+            item['id'] = d.id
+            
+            # Allotment Date Handling
+            allot_date = item.get('Allotment_Date')
+            if allot_date:
+                item['Allotment_Date_Disp'] = allot_date.strftime('%d-%m-%Y') if hasattr(allot_date, 'strftime') else str(allot_date)
+            else:
+                item['Allotment_Date_Disp'] = "N/A"
+            
+            # Vacation Date Handling
+            vac_date = item.get('Vacation_Date')
+            if vac_date:
+                item['Vacation_Date_Disp'] = vac_date.strftime('%d-%m-%Y') if hasattr(vac_date, 'strftime') else str(vac_date)
+            else:
+                item['Vacation_Date_Disp'] = "Occupied" if item.get('Status') == "Occupied" else "N/A"
+                
+            data.append(item)
+        return pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"Data Fetch Error: {e}")
+        return pd.DataFrame()
 
 # --- 3. Template Filling Logic ---
-def fill_quarter_template(template_path, data_map):
+def fill_template(template_path, data_map):
     doc = Document(template_path)
-    # Paragraphs replacement
+    # Paragraphs aur Tables mein placeholders {{KEY}} replace karna
     for p in doc.paragraphs:
         for key, val in data_map.items():
-            placeholder = "{{" + key + "}}"
-            if placeholder in p.text:
-                p.text = p.text.replace(placeholder, str(val))
-    # Tables replacement
+            if f"{{{{{key}}}}}" in p.text:
+                p.text = p.text.replace(f"{{{{{key}}}}}", str(val))
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
                     for key, val in data_map.items():
-                        placeholder = "{{" + key + "}}"
-                        if placeholder in p.text:
-                            p.text = p.text.replace(placeholder, str(val))
+                        if f"{{{{{key}}}}}" in p.text:
+                            p.text = p.text.replace(f"{{{{{key}}}}}", str(val))
     return doc
 
 # --- 4. Main App Interface ---
@@ -104,7 +115,7 @@ def main():
     ALLOT_TEMP = os.path.join(BASE_DIR, "assets", "Quarter_Allotment_Template.docx")
     VACATE_TEMP = os.path.join(BASE_DIR, "assets", "Quarter_Vacation_Template.docx")
 
-    tab1, tab2, tab3 = st.tabs(["🏠 Allotment", "🗝️ Vacation", "📊 Report & Full History"])
+    tab1, tab2, tab3 = st.tabs(["🏠 Allotment", "🗝️ Vacation", "📊 Full History Report"])
 
     # --- TAB 1: ALLOTMENT ---
     with tab1:
@@ -112,114 +123,95 @@ def main():
         df_emp = get_employees_cached()
         if not df_emp.empty:
             emp_options = df_emp.apply(lambda r: f"{r['Employee Name']} ({r['HRMS ID']})", axis=1).tolist()
-            selected_emp_str = st.selectbox("Select Employee", emp_options)
-            q_number = st.text_input("Quarter Number", placeholder="e.g. T-15/B")
-            station = st.text_input("Station", value="सरईग्राम")
-            allot_date = st.date_input("Allotment Effective Date")
+            selected_emp = st.selectbox("Select Staff", emp_options)
+            q_no = st.text_input("Quarter No.")
+            stn = st.text_input("Station", value="सरईग्राम")
+            allot_date = st.date_input("Allotment Date")
 
             if st.button("Allot & Generate Letter"):
-                h_id = selected_emp_str.split('(')[-1].strip(')')
-                emp_row = df_emp[df_emp['HRMS ID'] == h_id].iloc[0]
+                h_id = selected_emp.split('(')[-1].strip(')')
+                row = df_emp[df_emp['HRMS ID'] == h_id].iloc[0]
                 
-                data_map = {
-                    "EMPLOYEE_NAME": str(emp_row['Employee Name']),
-                    "DESIGNATION": str(emp_row['Designation']),
-                    "UNIT": str(emp_row.get('Unit', 'SSE/P.Way/SGAM')),
-                    "PF_Number": str(emp_row.get('PF Number', '')),
+                data = {
+                    "EMPLOYEE_NAME": str(row['Employee Name']),
+                    "DESIGNATION": str(row['Designation']),
+                    "PF_Number": str(row.get('PF Number', '')),
                     "HRMS_ID": h_id,
-                    "QUARTER_NUMBER": q_number,
-                    "STATION": station,
+                    "UNIT": str(row.get('Unit', 'SSE/P.Way/SGAM')),
+                    "QUARTER_NUMBER": q_no,
+                    "STATION": stn,
                     "DATE": allot_date.strftime("%d/%m/%Y")
                 }
-
-                # Save to quarter_history
+                
                 db.collection("quarter_history").add({
-                    **data_map,
+                    **data,
                     "Allotment_Date": datetime.combine(allot_date, datetime.min.time()),
                     "Status": "Occupied",
                     "Vacation_Date": None
                 })
                 
-                doc = fill_quarter_template(ALLOT_TEMP, data_map)
+                doc = fill_template(ALLOT_TEMP, data)
                 buf = io.BytesIO()
                 doc.save(buf)
-                st.success(f"Quarter {q_number} allotted to {data_map['EMPLOYEE_NAME']}")
-                st.download_button("📥 Download Allotment Letter", buf.getvalue(), f"Allotment_{h_id}.docx")
-        else:
-            st.error("Employee database is empty.")
+                st.success("Allotment Done!")
+                st.download_button("📥 Download Letter", buf.getvalue(), f"Allotment_{q_no}.docx")
 
     # --- TAB 2: VACATION ---
     with tab2:
         st.header("Quarter Vacation Form")
-        df_hist = get_full_quarter_history()
-        occupied_q = df_hist[df_hist['Status'] == "Occupied"] if not df_hist.empty else pd.DataFrame()
-
-        if not occupied_q.empty:
-            q_options = occupied_q.apply(lambda r: f"{r['QUARTER_NUMBER']} - {r['EMPLOYEE_NAME']}", axis=1).tolist()
-            selected_vac = st.selectbox("Select Quarter to Vacate", q_options)
-            vac_date = st.date_input("Vacation Effective Date")
+        df_h = get_full_quarter_history()
+        occupied = df_h[df_h['Status'] == "Occupied"] if not df_h.empty else pd.DataFrame()
+        
+        if not occupied.empty:
+            q_list = occupied.apply(lambda r: f"{r['QUARTER_NUMBER']} - {r['EMPLOYEE_NAME']}", axis=1).tolist()
+            sel_q = st.selectbox("Select Quarter to Vacate", q_list)
+            v_date = st.date_input("Vacation Date")
 
             if st.button("Vacate & Generate Letter"):
-                idx = q_options.index(selected_vac)
-                orig_data = occupied_q.iloc[idx]
-                doc_id = orig_data['id']
+                q_row = occupied.iloc[q_list.index(sel_q)]
+                v_data = q_row.to_dict()
+                v_data['DATE'] = v_date.strftime("%d/%m/%Y")
                 
-                vac_data_map = orig_data.to_dict()
-                vac_data_map['DATE'] = vac_date.strftime("%d/%m/%Y") # Update placeholder date
-
-                # Update Firestore
-                db.collection("quarter_history").document(doc_id).update({
+                db.collection("quarter_history").document(q_row['id']).update({
                     "Status": "Vacated",
-                    "Vacation_Date": datetime.combine(vac_date, datetime.min.time())
+                    "Vacation_Date": datetime.combine(v_date, datetime.min.time())
                 })
                 
-                doc = fill_quarter_template(VACATE_TEMP, vac_data_map)
+                doc = fill_template(VACATE_TEMP, v_data)
                 buf = io.BytesIO()
                 doc.save(buf)
-                st.success(f"Quarter {vac_data_map['QUARTER_NUMBER']} marked as Vacated.")
-                st.download_button("📥 Download Vacation Letter", buf.getvalue(), f"Vacation_{vac_data_map['HRMS_ID']}.docx")
-        else:
-            st.info("No occupied quarters found to vacate.")
+                st.success("Vacation Processed!")
+                st.download_button("📥 Download Letter", buf.getvalue(), f"Vacation_{v_data['QUARTER_NUMBER']}.docx")
 
-    # --- TAB 3: REPORT ---
+    # --- TAB 3: FULL REPORT ---
     with tab3:
-        st.header("📋 Full Quarter History Database")
-        df_report = get_full_quarter_history()
+        st.header("📊 Quarter History Master Database")
+        df_full = get_full_quarter_history()
         
-        if not df_report.empty:
-            # Stats
-            total_q = len(df_report['QUARTER_NUMBER'].unique())
-            occupied_count = len(df_report[df_report['Status'] == "Occupied"])
-            
-            c1, c2 = st.columns(2)
-            c1.metric("Unique Quarters Handled", total_q)
-            c2.metric("Currently Occupied", occupied_count)
-
-            # Search / Filter
-            search = st.text_input("🔍 Search by Quarter No, Name or HRMS ID")
-            if search:
-                df_report = df_report[
-                    df_report['QUARTER_NUMBER'].str.contains(search, case=False) | 
-                    df_report['EMPLOYEE_NAME'].str.contains(search, case=False) |
-                    df_report['HRMS_ID'].str.contains(search, case=False)
-                ]
-
-            # Display Table
-            display_df = df_report[[
+        if not df_full.empty:
+            # Header Formatting
+            disp_df = df_full[[
                 'QUARTER_NUMBER', 'EMPLOYEE_NAME', 'DESIGNATION', 
                 'HRMS_ID', 'Allotment_Date_Disp', 'Vacation_Date_Disp', 'Status'
             ]].rename(columns={
-                'Allotment_Date_Disp': 'Allotted On',
-                'Vacation_Date_Disp': 'Vacated On'
+                'QUARTER_NUMBER': 'Quarter No.', 'EMPLOYEE_NAME': 'Staff Name',
+                'Allotment_Date_Disp': 'Allotted On', 'Vacation_Date_Disp': 'Vacated On'
             })
 
-            st.dataframe(display_df, use_container_width=True)
+            # Universal Search
+            search = st.text_input("🔍 Search Quarter, Name or ID")
+            if search:
+                disp_df = disp_df[disp_df.apply(lambda r: r.astype(str).str.contains(search, case=False).any(), axis=1)]
 
-            # CSV Download
-            csv = df_report.to_csv(index=False).encode('utf-8-sig')
-            st.download_button("📥 Export Full History to CSV", csv, "quarter_master_report.csv", "text/csv")
+            # Table Display
+            st.dataframe(disp_df, use_container_width=True, column_config={
+                "Status": st.column_config.BadgeColumn(map={"Occupied": "🔴 Occupied", "Vacated": "🟢 Vacated"})
+            })
+            
+            # Export
+            st.download_button("📥 Export CSV", disp_df.to_csv(index=False).encode('utf-8-sig'), "Quarter_Report.csv", "text/csv")
         else:
-            st.warning("No records found in quarter_history collection.")
+            st.info("No records found in quarter_history collection.")
 
 if __name__ == "__main__":
     main()
