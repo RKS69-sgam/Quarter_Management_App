@@ -119,7 +119,7 @@ def main():
             
             # 2. Selected Karmchari ka Station fetch karein
             pf_key = selected_emp.split('(')[-1].strip(')')
-            staff_station = str(emp_map[pf_key].get('Station', '')).strip()
+            staff_station = str(emp_map[pf_key].get('STATION', '')).strip()
             
             st.info(f"📍 Karmchari ka Allotted Station: **{staff_station}**")
 
