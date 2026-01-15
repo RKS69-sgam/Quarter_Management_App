@@ -181,22 +181,64 @@ def main():
             else: st.info("Koi occupied quarter nahi mila.")
 
     with tab3:
-        st.header("📊 Quarter Master Database")
+        st.header("📊 Quarter History Master Database")
         df_full = get_full_quarter_history()
+        
         if not df_full.empty:
-            # Columns rename for better display as per your image
-            disp_df = df_full[[
-                'quarter_number', 'employee_name', 'designation', 
-                'hrms_id', 'allotment_date_disp', 'vacation_date_disp', 'is_current'
-            ]].rename(columns={
-                'quarter_number': 'Quarter No', 'employee_name': 'Name',
-                'allotment_date_disp': 'Allotted', 'vacation_date_disp': 'Vacated',
-                'is_current': 'Occupied Now'
+            # Columns list jisme 'station' ko shamil kiya gaya hai
+            cols_to_show = [
+                'quarter_number', 
+                'employee_name', 
+                'designation', 
+                'hrms_id', 
+                'station',  # Yeh field ab report mein dikhegi
+                'allotment_date_disp', 
+                'vacation_date_disp', 
+                'is_current'
+            ]
+            
+            # Sirf wahi columns lein jo DataFrame mein maujood hain (Error se bachne ke liye)
+            existing_cols = [c for c in cols_to_show if c in df_full.columns]
+            
+            # Display ke liye Sundar Headers (Rename)
+            disp_df = df_full[existing_cols].rename(columns={
+                'quarter_number': 'Quarter No',
+                'employee_name': 'Staff Name',
+                'designation': 'Designation',
+                'hrms_id': 'HRMS ID',
+                'station': 'Station',  # CSV aur Table header
+                'allotment_date_disp': 'Allotted On',
+                'vacation_date_disp': 'Vacated On',
+                'is_current': 'Status'
             })
-            st.dataframe(disp_df, use_container_width=True)
-            st.download_button("📥 Export CSV", disp_df.to_csv(index=False).encode('utf-8-sig'), "Report.csv")
+
+            # Universal Search Filter
+            search = st.text_input("🔍 Search by Name, Quarter, ID or Station")
+            if search:
+                disp_df = disp_df[disp_df.apply(lambda r: r.astype(str).str.contains(search, case=False).any(), axis=1)]
+
+            # Screen par Table dikhana
+            st.dataframe(
+                disp_df, 
+                use_container_width=True,
+                column_config={
+                    "Status": st.column_config.BadgeColumn(
+                        map={True: "🔴 Occupied", False: "🟢 Vacated"}
+                    )
+                }
+            )
+            
+            # --- CSV Export Logic (Station ke saath) ---
+            csv_data = disp_df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="📥 Download Full Report (CSV)",
+                data=csv_data,
+                file_name=f"Quarter_Report_{datetime.now().strftime('%d%m%Y')}.csv",
+                mime="text/csv"
+            )
         else:
-            st.warning("Database empty hai.")
+            st.warning("Database mein koi record nahi mila.")
+
 
 if __name__ == "__main__":
     main()
