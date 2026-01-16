@@ -138,7 +138,7 @@ with tab1:
         with st.form("memo_form"):
             c1, c2, c3 = st.columns(3)
             memo_date = c1.date_input("Letter Date", value=datetime.now())
-            hospital = c2.selectbox("Hospital", ["BEOHARI", "NEW KATNI", "SHAHDOL", "JABALPUR"])
+            hospital = c2.selectbox("Hospital", ["BEOHARI", "NEW KATNI", "JABALPUR"])
             age_val = calculate_age(p_data.get('DOB'))
             age = c3.text_input("Age (Auto Calculated)", value=age_val)
 
