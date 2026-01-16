@@ -48,48 +48,27 @@ def get_employees():
         data.append(emp)
     return pd.DataFrame(data) if data else pd.DataFrame()
 
-def get_sick_records():
-    docs = db.collection(SICK_COLLECTION).stream()
-    data = []
-    for d in docs:
-        item = d.to_dict()
-        item['id'] = d.id
-        # Ensure PF_Number exists in dictionary for DataFrame
-        if 'PF_Number' not in item: item['PF_Number'] = ""
-        if 'ReturnDate' not in item: item['ReturnDate'] = "N/A"
-        data.append(item)
-    
-    # Error Prevention: Define columns if data is empty
-    cols = ['Name', 'PF_Number', 'MemoType', 'StartDate', 'Status', 'ReturnDate']
-    if not data:
-        return pd.DataFrame(columns=cols)
-    
-    df = pd.DataFrame(data)
-    # Ensure all required columns exist in the DF to avoid KeyError
-    for c in cols:
-        if c not in df.columns: df[c] = ""
-        
-    if 'Created' in df.columns:
-        df = df.sort_values(by='Created', ascending=False)
-    return df
-
 def generate_docx(template_path, data):
     if not os.path.exists(template_path): return None
     try:
         doc = Document(template_path)
-        all_paras = list(doc.paragraphs)
+        # Search in Paragraphs and Tables
+        all_elements = list(doc.paragraphs)
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
-                    all_paras.extend(list(cell.paragraphs))
+                    all_elements.extend(list(cell.paragraphs))
         
-        for p in all_paras:
+        for p in all_elements:
             for key, value in data.items():
                 placeholder = f"[{key}]"
                 if placeholder in p.text:
                     for run in p.runs:
                         if placeholder in run.text:
                             run.text = run.text.replace(placeholder, str(value))
+                    # Fallback for complex formatting
+                    if placeholder in p.text:
+                        p.text = p.text.replace(placeholder, str(value))
         bio = io.BytesIO()
         doc.save(bio)
         return bio.getvalue()
@@ -123,47 +102,68 @@ with tab1:
         memo_type = st.radio("Choose Memo Type:", ["SICK", "IOD"], horizontal=True)
         emp_options = df_emp.apply(lambda r: f"{r['Employee Name']} ({r['PF_Clean']})", axis=1).tolist()
         
-        selected_p = st.selectbox("Select Employee (Patient)", emp_options)
+        selected_p = st.selectbox("Select Patient Employee", emp_options)
         p_pf = selected_p.split('(')[-1].strip(')')
         p_data = df_emp[df_emp['PF_Clean'] == p_pf].iloc[0]
 
         with st.form("memo_form"):
-            c1, c2 = st.columns(2)
+            st.subheader("General Details")
+            c1, c2, c3 = st.columns(3)
             memo_date = c1.date_input("Letter Date", value=datetime.now())
             hospital = c2.selectbox("Hospital", ["BEOHARI", "NEW KATNI", "SHAHDOL", "JABALPUR"])
-            
-            witness_info = {}
+            age = c3.text_input("Age", value=str(p_data.get('Age', '')))
+
+            # IOD SPECIFIC FIELDS
+            iod_data = {}
             if memo_type == "IOD":
                 st.divider()
                 st.subheader("Injury & Witness Details")
-                ic1, ic2 = st.columns(2)
-                injury_date = ic1.date_input("Injury Date")
-                injury_time = ic2.text_input("Injury Time")
-                injury_reason = st.text_area("Reason of Injury")
-                wc1, wc2 = st.columns(2)
-                w1_sel = wc1.selectbox("First Witness", ["Select"] + emp_options)
-                w2_sel = wc2.selectbox("Second Witness", ["Select"] + emp_options)
                 
-                if w1_sel != "Select":
+                ic1, ic2, ic3 = st.columns(3)
+                injury_date = ic1.date_input("Injury Date")
+                injury_time = ic2.text_input("Injury Time (e.g. 10:30 AM)")
+                acc_place = ic3.text_input("Accident Place (e.g. Yard, Station)")
+                
+                nature = st.radio("Nature of Injury:", ["साधारण", "गंभीर"], horizontal=True)
+                reason = st.text_area("How did the injury happen? (Reason)")
+                
+                wc1, wc2 = st.columns(2)
+                w1_sel = wc1.selectbox("First Witness (Gawah 1)", ["Select Witness"] + emp_options)
+                w2_sel = wc2.selectbox("Second Witness (Gawah 2)", ["Select Witness"] + emp_options)
+                
+                # Witness Data Mapping
+                if w1_sel != "Select Witness":
                     w1_row = df_emp[df_emp['PF_Clean'] == w1_sel.split('(')[-1].strip(')')].iloc[0]
-                    witness_info.update({"WITNESS1_NAME": w1_row['Employee Name'], "WITNESS1_DESIG": w1_row['Designation']})
-                if w2_sel != "Select":
+                    iod_data["FIRST WITNESS"] = f"{w1_row['Employee Name']}, {w1_row['Designation']}"
+                
+                if w2_sel != "Select Witness":
                     w2_row = df_emp[df_emp['PF_Clean'] == w2_sel.split('(')[-1].strip(')')].iloc[0]
-                    witness_info.update({"WITNESS2_NAME": w2_row['Employee Name'], "WITNESS2_DESIG": w2_row['Designation']})
+                    iod_data["SECOND WITNESS"] = f"{w2_row['Employee Name']}, {w2_row['Designation']}"
 
-            if st.form_submit_button("Save & Generate"):
+                iod_data.update({
+                    "ACCIDENT PLACE": acc_place,
+                    "NATURE OF INJURY": nature,
+                    "INJURY DATE": injury_date.strftime("%d/%m/%Y"),
+                    "TIME": injury_time,
+                    "INJURY REASON": reason
+                })
+
+            if st.form_submit_button("Save & Generate Memo"):
+                # Unified Data Mapping for Word Placeholders
                 word_data = {
                     "LETTER DATE": memo_date.strftime("%d/%m/%Y"),
                     "EMPLOYEE NAME": p_data.get('Employee Name in Hindi', p_data.get('Employee Name', '')),
                     "PF NUMBER": p_pf,
                     "DESIGNATION": p_data.get('Designation in Hindi', p_data.get('Designation', '')),
-                    "UNIT": p_data.get('UNIT No.', ''), **witness_info
+                    "UNIT NUMBER": p_data.get('UNIT No.', p_data.get('Unit', '')),
+                    "WORKING STATION": p_data.get('STATION', 'SGAM'),
+                    "DOA": p_data.get('DOA', ''), # Date of Appointment
+                    "AGE": age,
+                    **iod_data
                 }
-                if memo_type == "IOD":
-                    word_data.update({"INJURY DATE": injury_date.strftime("%d/%m/%Y"), "TIME": injury_time, "INJURY REASON": injury_reason})
 
+                # Save Record to Firebase
                 db.collection(SICK_COLLECTION).add({
-                    "HRMS_ID": p_data.get('HRMS ID', ''),
                     "PF_Number": p_pf,
                     "Name": p_data.get('Employee Name', ''),
                     "MemoType": memo_type,
@@ -171,34 +171,50 @@ with tab1:
                     "Status": "SICK" if memo_type == "SICK" else "IOD_ACTIVE",
                     "Created": datetime.now()
                 })
+                
                 t_path = IOD_TEMP if memo_type == "IOD" else SICK_TEMP
                 st.session_state.memo_bytes = generate_docx(t_path, word_data)
                 st.session_state.last_memo_name = f"{memo_type}_{p_pf}.docx"
-                st.success("✅ Saved!"); st.rerun()
+                st.success("✅ Saved Successfully!")
 
         if 'memo_bytes' in st.session_state and st.session_state.memo_bytes:
-            st.download_button("📥 Download Memo", st.session_state.memo_bytes, st.session_state.last_memo_name)
+            st.download_button("📥 Download Memo (DOCX)", st.session_state.memo_bytes, st.session_state.last_memo_name)
 
+# =================================================================
+# --- TAB 2: DASHBOARD & HISTORY ---
+# =================================================================
 with tab2:
-    st.header("📊 Health Reports")
-    df_sick = get_sick_records()
+    st.header("📊 Health Dashboard & Return Status")
+    docs = db.collection(SICK_COLLECTION).stream()
+    sick_data = []
+    for d in docs:
+        item = d.to_dict()
+        item['id'] = d.id
+        sick_data.append(item)
     
-    # Counting logic
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total Sick", len(df_sick[df_sick['MemoType']=='SICK']))
-    m2.metric("Total IOD", len(df_sick[df_sick['MemoType']=='IOD']))
-    active = df_sick[df_sick['Status'].isin(['SICK', 'IOD_ACTIVE'])]
-    m3.metric("Active Cases", len(active))
-    
-    st.divider()
-    if not active.empty:
-        sel_ret = st.selectbox("Mark FIT", active.apply(lambda r: f"{r['Name']} ({r['PF_Number']})", axis=1))
-        if st.button("Confirm FIT"):
-            target_id = active.iloc[0]['id'] # simplistic for demo
-            db.collection(SICK_COLLECTION).document(target_id).update({"Status": "FIT", "ReturnDate": str(datetime.now().date())})
-            st.rerun()
+    if sick_data:
+        df_sick = pd.DataFrame(sick_data)
+        
+        # Dashboard Counters
+        
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total Sick", len(df_sick[df_sick['MemoType']=='SICK']))
+        m2.metric("Total IOD", len(df_sick[df_sick['MemoType']=='IOD']))
+        active = df_sick[df_sick['Status'].isin(['SICK', 'IOD_ACTIVE'])]
+        m3.metric("Currently Sick/IOD", len(active))
+        
+        st.divider()
+        
+        # Mark Fit
+        if not active.empty:
+            st.subheader("Mark FIT (Return to Duty)")
+            sel_fit = st.selectbox("Select Employee", active.apply(lambda r: f"{r['Name']} ({r['PF_Number']})", axis=1))
+            if st.button("Confirm Return (FIT)"):
+                idx = active[active.apply(lambda r: f"{r['Name']} ({r['PF_Number']})", axis=1) == sel_fit].iloc[0]['id']
+                db.collection(SICK_COLLECTION).document(idx).update({"Status": "FIT", "ReturnDate": str(datetime.now().date())})
+                st.rerun()
 
-    st.subheader("📑 History")
-    # FIX: Safety check for columns before displaying dataframe
-    display_cols = ['Name', 'PF_Number', 'MemoType', 'StartDate', 'Status', 'ReturnDate']
-    st.dataframe(df_sick[display_cols], use_container_width=True)
+        st.subheader("📑 Full History")
+        st.dataframe(df_sick, use_container_width=True)
+    else:
+        st.info("No records found in database.")
