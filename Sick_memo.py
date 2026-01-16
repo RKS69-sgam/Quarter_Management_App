@@ -129,7 +129,7 @@ with tab1:
         p_pf = selected_p.split('(')[-1].strip(')')
         p_data = df_emp[df_emp['PF_Clean'] == p_pf].iloc[0]
 
-        # VALIDATION: Check if already Sick/IOD
+        # Duplicate Check
         is_already_active = not df_sick_check[(df_sick_check['PF_Number'] == p_pf) & 
                                               (df_sick_check['Status'].isin(['SICK', 'IOD_ACTIVE']))].empty
         if is_already_active:
@@ -149,11 +149,10 @@ with tab1:
                 ic1, ic2, ic3 = st.columns(3)
                 injury_date = ic1.date_input("Injury Date")
                 injury_time = ic2.text_input("Injury Time (HH:MM)")
-                
-                # REASON AUTO-FILL FROM ACCIDENT PLACE
                 acc_place = ic3.text_input("Accident Place")
-                default_reason = f"Durghatna ka Sthan: {acc_place} - " if acc_place else ""
-                reason = st.text_area("Injury Reason (Editable)", value=default_reason)
+                
+                # --- AUTO-FILL REMOVED FROM REASON BOX ---
+                reason = st.text_area("Injury Reason (Manually Type Karein)")
                 
                 nature = st.radio("Nature of Injury:", ["साधारण", "गंभीर"], horizontal=True)
                 
@@ -188,7 +187,8 @@ with tab1:
                 })
                 t_path = IOD_TEMP if memo_type == "IOD" else SICK_TEMP
                 st.session_state.memo_bytes = generate_docx(t_path, word_data)
-                # DYNAMIC FILENAME BY EMPLOYEE NAME
+                
+                # Filename: Employee Name ke sath
                 safe_name = p_data['Employee Name'].replace(" ", "_")
                 st.session_state.last_memo_name = f"{memo_type}_{safe_name}.docx"
                 st.success("✅ Record Saved!"); st.rerun()
@@ -214,7 +214,8 @@ with tab2:
             st.subheader("🔄 Update Status to FIT")
             sel_list = active_cases.apply(lambda r: f"{r['Name']} ({r['PF_Number']})", axis=1).tolist()
             returning = st.selectbox("Karmchari Select Karein:", sel_list)
-            # MANUAL DATE FOR FIT STATUS
+            
+            # Manual Date for Fit Status
             fit_date_manual = st.date_input("FIT Date (Select Manually)", value=datetime.now())
             if st.button("Confirm FIT Status"):
                 doc_id = active_cases.iloc[sel_list.index(returning)]['id']
