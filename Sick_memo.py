@@ -30,7 +30,7 @@ def init_db():
                 cred = credentials.Certificate('sgamoffice-firebase-adminsdk-fbsvc-253915b05b.json')
             firebase_admin.initialize_app(cred)
         except Exception as e:
-            st.error(f"Firebase Init Error: {e}"); st.stop()
+            st.error(f"Firebase Error: {e}"); st.stop()
     return firestore.client()
 
 db = init_db()
@@ -65,11 +65,7 @@ def get_employees():
 
 def get_sick_records():
     docs = db.collection(SICK_COLLECTION).stream()
-    data = []
-    for d in docs:
-        item = d.to_dict()
-        item['id'] = d.id
-        data.append(item)
+    data = [{**d.to_dict(), 'id': d.id} for d in docs]
     cols = ['Name', 'PF_Number', 'MemoType', 'StartDate', 'Status', 'ReturnDate']
     if not data: return pd.DataFrame(columns=cols)
     df = pd.DataFrame(data)
@@ -133,22 +129,18 @@ with tab1:
         p_pf = selected_p.split('(')[-1].strip(')')
         p_data = df_emp[df_emp['PF_Clean'] == p_pf].iloc[0]
 
-        # --- VALIDATION: Check if already Sick/IOD ---
-        is_already_active = False
-        if not df_sick_check.empty:
-            active_match = df_sick_check[(df_sick_check['PF_Number'] == p_pf) & 
-                                         (df_sick_check['Status'].isin(['SICK', 'IOD_ACTIVE']))]
-            if not active_match.empty:
-                is_already_active = True
-                current_status = active_match.iloc[0]['Status']
-                st.warning(f"⚠️ **Dhyan Dein:** {p_data['Employee Name']} pehle se **{current_status}** mein hain. Jab tak unhe FIT mark nahi kiya jata, naya letter generate nahi ho sakta.")
+        # VALIDATION: Check if already Sick/IOD
+        is_already_active = not df_sick_check[(df_sick_check['PF_Number'] == p_pf) & 
+                                              (df_sick_check['Status'].isin(['SICK', 'IOD_ACTIVE']))].empty
+        if is_already_active:
+            st.warning(f"⚠️ **{p_data['Employee Name']}** pehle se Sick/IOD list mein hain. Pehle FIT mark karein.")
 
         with st.form("memo_form"):
             c1, c2, c3 = st.columns(3)
             memo_date = c1.date_input("Letter Date", value=datetime.now())
             hospital = c2.selectbox("Hospital", ["BEOHARI", "NEW KATNI", "SHAHDOL", "JABALPUR"])
             age_val = calculate_age(p_data.get('DOB'))
-            age = c3.text_input("Age (Auto)", value=age_val)
+            age = c3.text_input("Age (Auto Calculated)", value=age_val)
 
             iod_data = {}
             if memo_type == "IOD":
@@ -157,12 +149,17 @@ with tab1:
                 ic1, ic2, ic3 = st.columns(3)
                 injury_date = ic1.date_input("Injury Date")
                 injury_time = ic2.text_input("Injury Time (HH:MM)")
+                
+                # REASON AUTO-FILL FROM ACCIDENT PLACE
                 acc_place = ic3.text_input("Accident Place")
+                default_reason = f"Durghatna ka Sthan: {acc_place} - " if acc_place else ""
+                reason = st.text_area("Injury Reason (Editable)", value=default_reason)
+                
                 nature = st.radio("Nature of Injury:", ["साधारण", "गंभीर"], horizontal=True)
-                reason = st.text_area("Reason of Injury")
+                
                 wc1, wc2 = st.columns(2)
-                w1_sel = wc1.selectbox("First Witness (Hindi)", ["Select"] + emp_options)
-                w2_sel = wc2.selectbox("Second Witness (Hindi)", ["Select"] + emp_options)
+                w1_sel = wc1.selectbox("First Witness (Gawah 1)", ["Select"] + emp_options)
+                w2_sel = wc2.selectbox("Second Witness (Gawah 2)", ["Select"] + emp_options)
                 
                 if w1_sel != "Select":
                     w1_row = df_emp[df_emp['PF_Clean'] == w1_sel.split('(')[-1].strip(')')].iloc[0]
@@ -173,35 +170,37 @@ with tab1:
                 
                 iod_data.update({"ACCIDENT PLACE": acc_place, "NATURE OF INJURY": nature, "INJURY DATE": injury_date.strftime("%d/%m/%Y"), "TIME": injury_time, "INJURY REASON": reason})
 
-            # Submit button state based on validation
-            submit_btn = st.form_submit_button("Save & Generate Memo", disabled=is_already_active)
-
-            if submit_btn:
+            if st.form_submit_button("Save & Generate Memo", disabled=is_already_active):
                 word_data = {
                     "LETTER DATE": memo_date.strftime("%d/%m/%Y"),
-                    "EMPLOYEE NAME": p_data.get('Employee Name in Hindi', p_data.get('Employee Name', '')),
+                    "EMPLOYEE NAME": p_data.get('Employee Name in Hindi', p_data['Employee Name']),
                     "PF NUMBER": p_pf,
-                    "DESIGNATION": p_data.get('Designation in Hindi', p_data.get('Designation', '')),
+                    "DESIGNATION": p_data.get('Designation in Hindi', p_data['Designation']),
                     "UNIT NUMBER": p_data.get('UNIT No.', ''),
                     "WORKING STATION": p_data.get('STATION', 'SGAM'),
                     "DOA": format_date_dmy(p_data.get('DOA')),
                     "AGE": age, **iod_data
                 }
                 db.collection(SICK_COLLECTION).add({
-                    "PF_Number": p_pf, "Name": p_data.get('Employee Name', ''), "MemoType": memo_type,
+                    "PF_Number": p_pf, "Name": p_data['Employee Name'], "MemoType": memo_type,
                     "StartDate": str(memo_date), "Status": "SICK" if memo_type == "SICK" else "IOD_ACTIVE",
                     "Created": datetime.now()
                 })
                 t_path = IOD_TEMP if memo_type == "IOD" else SICK_TEMP
                 st.session_state.memo_bytes = generate_docx(t_path, word_data)
-                st.session_state.last_memo_name = f"{memo_type}_{p_pf}.docx"
+                # DYNAMIC FILENAME BY EMPLOYEE NAME
+                safe_name = p_data['Employee Name'].replace(" ", "_")
+                st.session_state.last_memo_name = f"{memo_type}_{safe_name}.docx"
                 st.success("✅ Record Saved!"); st.rerun()
 
-        if 'memo_bytes' in st.session_state and st.session_state.memo_bytes:
+        if 'memo_bytes' in st.session_state:
             st.download_button("📥 Download Memo", st.session_state.memo_bytes, st.session_state.last_memo_name)
 
+# =================================================================
+# --- TAB 2: DASHBOARD & HISTORY ---
+# =================================================================
 with tab2:
-    st.header("📊 Reports & Dashboard")
+    st.header("📊 Health Dashboard & History")
     df_sick = get_sick_records()
     if not df_sick.empty:
         m1, m2, m3 = st.columns(3)
@@ -212,12 +211,17 @@ with tab2:
         
         st.divider()
         if not active_cases.empty:
-            st.subheader("🔄 Mark FIT")
+            st.subheader("🔄 Update Status to FIT")
             sel_list = active_cases.apply(lambda r: f"{r['Name']} ({r['PF_Number']})", axis=1).tolist()
-            returning = st.selectbox("Wapas aane wala karmchari select karein:", sel_list)
+            returning = st.selectbox("Karmchari Select Karein:", sel_list)
+            # MANUAL DATE FOR FIT STATUS
+            fit_date_manual = st.date_input("FIT Date (Select Manually)", value=datetime.now())
             if st.button("Confirm FIT Status"):
                 doc_id = active_cases.iloc[sel_list.index(returning)]['id']
-                db.collection(SICK_COLLECTION).document(doc_id).update({"Status": "FIT", "ReturnDate": str(datetime.now().date())})
+                db.collection(SICK_COLLECTION).document(doc_id).update({
+                    "Status": "FIT", 
+                    "ReturnDate": str(fit_date_manual)
+                })
                 st.success("Karmchari FIT mark ho gaya!"); st.rerun()
 
         st.subheader("📑 Full History")
