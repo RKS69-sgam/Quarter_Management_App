@@ -173,7 +173,7 @@ def main():
                         doc = fill_template(ALLOT_TEMP, entry, a_date.strftime("%d/%m/%Y"))
                         if doc:
                             buf = io.BytesIO(); doc.save(buf)
-                            st.download_button("📥 Download Allotment Letter", buf.getvalue(), f"Allotment_{sel_q}.docx")
+                            st.download_button("📥 Download Allotment Letter", buf.getvalue(), f"Allotment_{emp_info.get('Employee Name')}.docx")
                 else:
                     st.warning(f"⚠️ {staff_station} station par koi vacant quarter nahi mila.")
 
@@ -199,7 +199,7 @@ def main():
                 if doc:
                     buf = io.BytesIO(); doc.save(buf)
                     st.success(f"✅ Quarter {q_row['quarter_number']} Vacated.")
-                    st.download_button("📥 Download Vacation Letter", buf.getvalue(), f"Vacation_{q_row['quarter_number']}.docx")
+                    st.download_button("📥 Download Vacation Letter", buf.getvalue(), f"Vacation_{sel_v}.docx")
         else:
             st.info("Abhi koi quarter occupied nahi hai.")
 
