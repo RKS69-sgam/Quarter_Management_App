@@ -30,15 +30,14 @@ if not st.session_state.auth:
 # =================================================================
 # --- 1. FIREBASE & PAY MATRIX ---
 # =================================================================
-# [span_0](start_span)[span_1](start_span)Pay Matrix as per 7th CPC[span_0](end_span)[span_1](end_span)
 PAY_MATRIX = {
-    "1": [18000, 18500, 19100, 19700, 20300, 20900, 21500, 22100, 22800],
-    "2": [19900, 20500, 21100, 21700, 22400, 23100, 23800, 24500, 25200],
-    "3": [21700, 22400, 23100, 23800, 24500, 25200, 26000, 26800, 27600],
-    "4": [25500, 26300, 27100, 27900, 28700, 29600, 30500, 31400, 32300],
-    "5": [29200, 30100, 31000, 31900, 32900, 33900, 34900, 35900, 37000],
-    "6": [35400, 36500, 37600, 38700, 39900, 41100, 42300, 43600, 44900],
-    "7": [44900, 46200, 47600, 49000, 50500, 52000, 53600, 55200, 56900]
+    "1": [18000, 18500, 19100, 19700, 20300, 20900, 21500, 22100, 22800, 23500, 24200],
+    "2": [19900, 20500, 21100, 21700, 22400, 23100, 23800, 24500, 25200, 26000, 26800],
+    "3": [21700, 22400, 23100, 23800, 24500, 25200, 26000, 26800, 27600, 28400, 29300],
+    "4": [25500, 26300, 27100, 27900, 28700, 29600, 30500, 31400, 32300, 33300, 34300],
+    "5": [29200, 30100, 31000, 31900, 32900, 33900, 34900, 35900, 37000, 38100, 39200],
+    "6": [35400, 36500, 37600, 38700, 39900, 41100, 42300, 43600, 44900, 46200, 47600],
+    "7": [44900, 46200, 47600, 49000, 50500, 52000, 53600, 55200, 56900, 58600, 60400]
 }
 
 if not firebase_admin._apps:
@@ -46,8 +45,9 @@ if not firebase_admin._apps:
     firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-# --- Utility Functions ---
+# --- Helper Functions ---
 def get_next_increment_date(promo_date):
+    # Logic: Before 1st July -> Jan Next Year | After 30 June -> July Next Year
     if promo_date.month <= 6:
         return f"01/01/{promo_date.year + 1}"
     else:
@@ -58,6 +58,7 @@ def find_cell_in_level(level, target_value):
     for val in cells:
         if val >= target_value:
             idx = cells.index(val) + 1
+            # [span_3](start_span)Next Index Basic for Increment calculation[span_3](end_span)
             nxt_val = cells[cells.index(val) + 1] if (cells.index(val) + 1) < len(cells) else val
             return val, idx, nxt_val
     return target_value, 1, target_value
@@ -67,18 +68,28 @@ def generate_docx(template_path, data):
     doc = Document(template_path)
     for p in list(doc.paragraphs):
         for k, v in data.items():
-            if f"[{k}]" in p.text:
-                p.text = p.text.replace(f"[{k}]", str(v))
+            placeholder = f"[{k}]"
+            if placeholder in p.text:
+                p.text = p.text.replace(placeholder, str(v))
+    
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    for k, v in data.items():
+                        placeholder = f"[{k}]"
+                        if placeholder in p.text:
+                            p.text = p.text.replace(placeholder, str(v))
+    
     bio = io.BytesIO()
     doc.save(bio)
     return bio.getvalue()
 
 # =================================================================
-# --- 2. MAIN APP ---
+# --- 2. MAIN UI ---
 # =================================================================
 tab1, tab2 = st.tabs(["🚀 Promotion Entry", "📜 History Report"])
 
-# Fetch Employees
 emp_docs = db.collection("employees").stream()
 df_emp = pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in emp_docs])
 
@@ -91,67 +102,79 @@ with tab1:
         initial_level = str(emp_data.get('Level', '1'))
 
         with st.form("promo_form"):
-            st.subheader(f"Promotion for: {emp_data['Employee Name']}")
+            st.subheader(f"Processing Promotion: {emp_data['Employee Name']}")
             c1, c2, c3 = st.columns(3)
             
-            # Editable Old Basic Pay
-            old_basic = c1.number_input("Old Basic Pay (Editable)", value=initial_basic)
+            # Old Basic editable mode
+            old_basic = c1.number_input("Old Basic Pay", value=initial_basic)
             promo_date = c2.date_input("Promotion Date")
-            [span_2](start_span)order_no = c3.text_input("Order Number")[span_2](end_span)
+            order_no = c3.text_input("Order Number")
             
             c4, c5 = st.columns(2)
-            [span_3](start_span)new_desig = c4.text_input("New Designation", value=emp_data.get('Designation', ''))[span_3](end_span)
-            [span_4](start_span)[span_5](start_span)target_level = c5.selectbox("Select New Level", list(PAY_MATRIX.keys()))[span_4](end_span)[span_5](end_span)
+            new_desig = c4.text_input("New Designation", value=emp_data.get('Designation', ''))
+            target_level = c5.selectbox("Target Level", list(PAY_MATRIX.keys()))
 
-            # [span_6](start_span)Logic[span_6](end_span)
+            # --- Calculation Logic ---
+            # 1. [span_4](start_span)1.03 Notional increment rounded to nearest 100[span_4](end_span)
             notional_pay = math.ceil((old_basic * 1.03) / 100) * 100
+            
+            # 2. [span_5](start_span)Find next higher basic in New Level[span_5](end_span)
             final_basic, new_idx, next_val = find_cell_in_level(target_level, notional_pay)
-            [span_7](start_span)next_incr_date = get_next_increment_date(promo_date)[span_7](end_span)
+            
+            # 3. [span_6](start_span)Next Increment Date[span_6](end_span)
+            next_incr_date = get_next_increment_date(promo_date)
 
-            st.info(f"New Basic: ₹{final_basic} | Level: {target_level} | Next Incr: {next_incr_date}")
+            st.info(f"Summary: New Basic ₹{final_basic} in Level {target_level}")
 
             if st.form_submit_button("Generate & Update"):
-                # 1. Update Employee
+                # Update Employee Database
                 db.collection("employees").document(emp_data['id']).update({
                     "Basic Pay": final_basic,
                     "Level": target_level,
-                    "Designation": new_desig
+                    "Designation": new_desig,
+                    "LastPromotionDate": str(promo_date)
                 })
                 
-                # 2. History
+                # Log History in Separate Collection
                 db.collection("promotion_history").add({
-                    "PF Number": selected_pf,
+                    "PFNUMBER": selected_pf,
                     "Name": emp_data['Employee Name'],
-                    "New Basic": final_basic,
-                    "Promotion Date": str(promo_date),
+                    "OldBasic": old_basic,
+                    "NewBasic": final_basic,
+                    "PromoDate": str(promo_date),
+                    "OrderNo": order_no,
                     "Timestamp": datetime.now()
                 })
 
-                # 3. [span_8](start_span)[span_9](start_span)Word Data Mapping[span_8](end_span)[span_9](end_span)
+                # [span_7](start_span)[span_8](start_span)[span_9](start_span)Map data to Word Template placeholders[span_7](end_span)[span_8](end_span)[span_9](end_span)
                 word_mapping = {
                     "PFNUMBER": selected_pf,
                     "EMPLOYEENAME": emp_data.get('Employee Name in Hindi', emp_data['Employee Name']),
                     "OLDDESIGNATION": emp_data.get('Designation', ''),
                     "NEWDESIGNATION": new_desig,
-                    "OLDBASICPAY": old_basic,
-                    "NEWBASICPAY": final_basic,
+                    "OLDBASICPAY": f"{old_basic}/-",
+                    "NEWBASICPAY": f"{final_basic}/-",
                     "PROMOTIONDATE": promo_date.strftime("%d.%m.%Y"),
                     "PROMOTIONORDERNUMBER": order_no,
                     "OLDLEVEL": initial_level,
                     "NEWLEVEL": target_level,
                     "NEXTINCRDATE": next_incr_date,
                     "STATION": emp_data.get('STATION', 'SGAM'),
-                    "MROUND100OLDBASICPAY*103%": notional_pay
+                    "MROUND100OLDBASICPAY*103%": notional_pay,
+                    "MROUND100ONEWBASICPAY*103%": math.ceil((final_basic * 1.03) / 100) * 100
                 }
                 
                 t_path = os.path.join("assets", "General Promotion MACP temp.docx")
                 st.session_state.promo_file = generate_docx(t_path, word_mapping)
-                st.success("Record Updated Successfully!")
+                st.success("Successfully Processed!")
                 st.rerun()
 
     if 'promo_file' in st.session_state:
-        st.download_button("📥 Download Promotion Memo", st.session_state.promo_file, "Promotion_Memo.docx")
+        st.download_button("📥 Download Promotion Document", st.session_state.promo_file, f"Promotion_{selected_pf}.docx")
 
 with tab2:
-    hist_docs = db.collection("promotion_history").order_by("Timestamp", direction=firestore.Query.DESCENDING).stream()
-    st.table([d.to_dict() for d in hist_docs])
+    st.subheader("Promotion & MACP Logs")
+    hist = db.collection("promotion_history").order_by("Timestamp", direction=firestore.Query.DESCENDING).stream()
+    logs = [d.to_dict() for d in hist]
+    if logs:
+        st.dataframe(pd.DataFrame(logs), use_container_width=True)
