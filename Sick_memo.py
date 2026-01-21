@@ -1,229 +1,161 @@
 import streamlit as st
 import pandas as pd
+import math
 from datetime import datetime
-import io
 import os
 import firebase_admin
 from firebase_admin import credentials, firestore
 from docx import Document
+import io
 
 # =================================================================
-# --- 0. PATH & FIREBASE SETUP ---
+# --- 0. CONFIG & AUTHENTICATION ---
 # =================================================================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SICK_TEMP = os.path.join(BASE_DIR, "assets", "SICK MEMO temp.docx")
-IOD_TEMP = os.path.join(BASE_DIR, "assets", "IOD_temp.docx")
+st.set_page_config(page_title="Railway Promotion System", layout="wide")
 
-SICK_COLLECTION = "sickemp"
-EMP_COLLECTION = "employees"
+if 'auth' not in st.session_state:
+    st.session_state.auth = False
 
+if not st.session_state.auth:
+    st.title("🔒 Admin Login")
+    with st.form("login"):
+        u = st.text_input("User")
+        p = st.text_input("Password", type="password")
+        if st.form_submit_button("Login"):
+            if u == "admin" and p == "Sgam@4321":
+                st.session_state.auth = True
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+    st.stop()
+
+# =================================================================
+# --- 1. FIREBASE CONNECTION (Secrets & Local Support) ---
+# =================================================================
 @st.cache_resource
 def init_db():
     if not firebase_admin._apps:
         try:
+            # Check Streamlit Secrets first
             if "firebase_config" in st.secrets:
                 cred_dict = dict(st.secrets["firebase_config"])
-                if isinstance(cred_dict.get('private_key'), str):
-                    cred_dict['private_key'] = cred_dict['private_key'].replace('\\n', '\n')
+                cred_dict["private_key"] = cred_dict["private_key"].replace("\\n", "\n")
                 cred = credentials.Certificate(cred_dict)
             else:
+                # Fallback to local file
                 cred = credentials.Certificate('sgamoffice-firebase-adminsdk-fbsvc-253915b05b.json')
             firebase_admin.initialize_app(cred)
         except Exception as e:
-            st.error(f"Firebase Error: {e}"); st.stop()
+            st.error(f"Database Connection Error: {e}")
+            st.stop()
     return firestore.client()
 
 db = init_db()
 
 # =================================================================
-# --- 1. UTILITIES ---
+# --- 2. PAY MATRIX & LOGIC ---
 # =================================================================
-def calculate_age(dob_val):
-    try:
-        if not dob_val or pd.isna(dob_val): return ""
-        dob = pd.to_datetime(dob_val)
-        today = datetime.now()
-        age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
-        return str(age)
-    except: return ""
+PAY_MATRIX = {
+    "1": [18000, 18500, 19100, 19700, 20300, 20900, 21500, 22100, 22800],
+    "2": [19900, 20500, 21100, 21700, 22400, 23100, 23800, 24500, 25200],
+    "3": [21700, 22400, 23100, 23800, 24500, 25200, 26000, 26800, 27600],
+    "4": [25500, 26300, 27100, 27900, 28700, 29600, 30500, 31400, 32300],
+    "5": [29200, 30100, 31000, 31900, 32900, 33900, 34900, 35900, 37000],
+    "6": [35400, 36500, 37600, 38700, 39900, 41100, 42300, 43600, 44900],
+    "7": [44900, 46200, 47600, 49000, 50500, 52000, 53600, 55200, 56900]
+}
 
-def format_date_dmy(date_val):
-    try:
-        if not date_val or pd.isna(date_val): return ""
-        return pd.to_datetime(date_val).strftime("%d/%m/%Y")
-    except: return str(date_val)
+def get_next_increment_date(promo_date):
+    return f"01/01/{promo_date.year + 1}" if promo_date.month <= 6 else f"01/07/{promo_date.year + 1}"
 
-def get_employees():
-    docs = db.collection(EMP_COLLECTION).stream()
-    data = []
-    for d in docs:
-        emp = d.to_dict()
-        raw_pf = emp.get('PF Number', '')
-        emp['PF_Clean'] = str(raw_pf).split('.')[0].strip() if raw_pf else ""
-        data.append(emp)
-    return pd.DataFrame(data) if data else pd.DataFrame()
-
-def get_sick_records():
-    docs = db.collection(SICK_COLLECTION).stream()
-    data = [{**d.to_dict(), 'id': d.id} for d in docs]
-    cols = ['Name', 'PF_Number', 'MemoType', 'StartDate', 'Status', 'ReturnDate']
-    if not data: return pd.DataFrame(columns=cols)
-    df = pd.DataFrame(data)
-    for c in cols:
-        if c not in df.columns: df[c] = ""
-    return df
+def find_cell_in_level(level, target_val):
+    cells = PAY_MATRIX.get(str(level), [])
+    for val in cells:
+        if val >= target_val:
+            idx = cells.index(val) + 1
+            return val, idx
+    return target_val, 1
 
 def generate_docx(template_path, data):
     if not os.path.exists(template_path): return None
-    try:
-        doc = Document(template_path)
-        all_paras = list(doc.paragraphs)
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    all_paras.extend(list(cell.paragraphs))
-        for p in all_paras:
-            for key, value in data.items():
-                placeholder = f"[{key}]"
-                if placeholder in p.text:
-                    for run in p.runs:
-                        if placeholder in run.text:
-                            run.text = run.text.replace(placeholder, str(value))
-                    if placeholder in p.text: p.text = p.text.replace(placeholder, str(value))
-        bio = io.BytesIO()
-        doc.save(bio)
-        return bio.getvalue()
-    except Exception as e:
-        st.error(f"Docx Error: {e}"); return None
+    doc = Document(template_path)
+    # [span_2](start_span)[span_3](start_span)Search in paragraphs and tables[span_2](end_span)[span_3](end_span)
+    for p in list(doc.paragraphs) + [p for t in doc.tables for r in t.rows for c in r.cells for p in c.paragraphs]:
+        for k, v in data.items():
+            if f"[{k}]" in p.text:
+                for run in p.runs:
+                    if f"[{k}]" in run.text:
+                        run.text = run.text.replace(f"[{k}]", str(v))
+    bio = io.BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
 
 # =================================================================
-# --- 2. AUTHENTICATION ---
+# --- 3. UI ---
 # =================================================================
-st.set_page_config(layout="wide", page_title="Railway Health MS")
-if 'auth' not in st.session_state: st.session_state.auth = False
-if not st.session_state.auth:
-    st.title("🔒 Admin Login")
-    with st.form("login"):
-        u, p = st.text_input("User"), st.text_input("Pass", type="password")
-        if st.form_submit_button("Login"):
-            if u == "admin" and p == "Sgam@4321":
-                st.session_state.auth = True; st.rerun()
-            else: st.error("Invalid Credentials")
-    st.stop()
+tab1, tab2 = st.tabs(["🚀 Promotion Entry", "📜 History Report"])
 
-# =================================================================
-# --- 3. MAIN UI ---
-# =================================================================
-tab1, tab2 = st.tabs(["📝 Generate Memo", "📊 Dashboard & History"])
+# Data Loading
+emp_docs = db.collection("employees").stream()
+df_emp = pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in emp_docs])
 
 with tab1:
-    st.header("Memo Generation")
-    df_emp = get_employees()
-    df_sick_check = get_sick_records()
-    
     if not df_emp.empty:
-        memo_type = st.radio("Choose Memo Type:", ["SICK", "IOD"], horizontal=True)
-        emp_options = df_emp.apply(lambda r: f"{r['Employee Name']} ({r['PF_Clean']})", axis=1).tolist()
+        pf_list = df_emp['PF Number'].unique().tolist()
+        selected_pf = st.selectbox("Select Employee PF Number", pf_list)
+        emp_data = df_emp[df_emp['PF Number'] == selected_pf].iloc[0]
         
-        selected_p = st.selectbox("Select Employee (Patient)", emp_options)
-        p_pf = selected_p.split('(')[-1].strip(')')
-        p_data = df_emp[df_emp['PF_Clean'] == p_pf].iloc[0]
-
-        # Duplicate Check
-        is_already_active = not df_sick_check[(df_sick_check['PF_Number'] == p_pf) & 
-                                              (df_sick_check['Status'].isin(['SICK', 'IOD_ACTIVE']))].empty
-        if is_already_active:
-            st.warning(f"⚠️ **{p_data['Employee Name']}** pehle se Sick/IOD list mein hain. Pehle FIT mark karein.")
-
-        with st.form("memo_form"):
-            c1, c2, c3 = st.columns(3)
-            memo_date = c1.date_input("Letter Date", value=datetime.now())
-            hospital = c2.selectbox("Hospital", ["BEOHARI", "NEW KATNI", "JABALPUR"])
-            age_val = calculate_age(p_data.get('DOB'))
-            age = c3.text_input("Age (Auto Calculated)", value=age_val)
-
-            iod_data = {}
-            if memo_type == "IOD":
-                st.divider()
-                st.subheader("Injury & Witness Details")
-                ic1, ic2, ic3 = st.columns(3)
-                injury_date = ic1.date_input("Injury Date")
-                injury_time = ic2.text_input("Injury Time (HH:MM)")
-                acc_place = ic3.text_input("Accident Place")
-                
-                # --- AUTO-FILL REMOVED FROM REASON BOX ---
-                reason = st.text_area("Injury Reason (Manually Type Karein)")
-                
-                nature = st.radio("Nature of Injury:", ["साधारण", "गंभीर"], horizontal=True)
-                
-                wc1, wc2 = st.columns(2)
-                w1_sel = wc1.selectbox("First Witness (Gawah 1)", ["Select"] + emp_options)
-                w2_sel = wc2.selectbox("Second Witness (Gawah 2)", ["Select"] + emp_options)
-                
-                if w1_sel != "Select":
-                    w1_row = df_emp[df_emp['PF_Clean'] == w1_sel.split('(')[-1].strip(')')].iloc[0]
-                    iod_data["FIRST WITNESS"] = f"{w1_row.get('Employee Name in Hindi', w1_row['Employee Name'])}, {w1_row.get('Designation in Hindi', w1_row['Designation'])}"
-                if w2_sel != "Select":
-                    w2_row = df_emp[df_emp['PF_Clean'] == w2_sel.split('(')[-1].strip(')')].iloc[0]
-                    iod_data["SECOND WITNESS"] = f"{w2_row.get('Employee Name in Hindi', w2_row['Employee Name'])}, {w2_row.get('Designation in Hindi', w2_row['Designation'])}"
-                
-                iod_data.update({"ACCIDENT PLACE": acc_place, "NATURE OF INJURY": nature, "INJURY DATE": injury_date.strftime("%d/%m/%Y"), "TIME": injury_time, "INJURY REASON": reason})
-
-            if st.form_submit_button("Save & Generate Memo", disabled=is_already_active):
-                word_data = {
-                    "LETTER DATE": memo_date.strftime("%d/%m/%Y"),
-                    "EMPLOYEE NAME": p_data.get('Employee Name in Hindi', p_data['Employee Name']),
-                    "PF NUMBER": p_pf,
-                    "DESIGNATION": p_data.get('Designation in Hindi', p_data['Designation']),
-                    "UNIT NUMBER": p_data.get('UNIT No.', ''),
-                    "WORKING STATION": p_data.get('STATION', 'SGAM'),
-                    "DOA": format_date_dmy(p_data.get('DOA')),
-                    "AGE": age, **iod_data
-                }
-                db.collection(SICK_COLLECTION).add({
-                    "PF_Number": p_pf, "Name": p_data['Employee Name'], "MemoType": memo_type,
-                    "StartDate": str(memo_date), "Status": "SICK" if memo_type == "SICK" else "IOD_ACTIVE",
-                    "Created": datetime.now()
-                })
-                t_path = IOD_TEMP if memo_type == "IOD" else SICK_TEMP
-                st.session_state.memo_bytes = generate_docx(t_path, word_data)
-                
-                # Filename: Employee Name ke sath
-                safe_name = p_data['Employee Name'].replace(" ", "_")
-                st.session_state.last_memo_name = f"{memo_type}_{safe_name}.docx"
-                st.success("✅ Record Saved!"); st.rerun()
-
-        if 'memo_bytes' in st.session_state:
-            st.download_button("📥 Download Memo", st.session_state.memo_bytes, st.session_state.last_memo_name)
-
-# =================================================================
-# --- TAB 2: DASHBOARD & HISTORY ---
-# =================================================================
-with tab2:
-    st.header("📊 Health Dashboard & History")
-    df_sick = get_sick_records()
-    if not df_sick.empty:
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Total Sick", len(df_sick[df_sick['MemoType']=='SICK']))
-        m2.metric("Total IOD", len(df_sick[df_sick['MemoType']=='IOD']))
-        active_cases = df_sick[df_sick['Status'].isin(['SICK', 'IOD_ACTIVE'])]
-        m3.metric("Active Cases", len(active_cases))
-        
-        st.divider()
-        if not active_cases.empty:
-            st.subheader("🔄 Update Status to FIT")
-            sel_list = active_cases.apply(lambda r: f"{r['Name']} ({r['PF_Number']})", axis=1).tolist()
-            returning = st.selectbox("Karmchari Select Karein:", sel_list)
+        with st.form("promotion_main_form"):
+            st.subheader(f"Employee: {emp_data['Employee Name']}")
+            col1, col2, col3 = st.columns(3)
             
-            # Manual Date for Fit Status
-            fit_date_manual = st.date_input("FIT Date (Select Manually)", value=datetime.now())
-            if st.button("Confirm FIT Status"):
-                doc_id = active_cases.iloc[sel_list.index(returning)]['id']
-                db.collection(SICK_COLLECTION).document(doc_id).update({
-                    "Status": "FIT", 
-                    "ReturnDate": str(fit_date_manual)
+            # Form Inputs
+            old_basic = col1.number_input("Old Basic Pay", value=float(emp_data.get('Basic Pay', 0)))
+            promo_date = col2.date_input("Promotion Date", value=datetime.now())
+            order_no = col3.text_input("Promotion Order Number")
+            
+            col4, col5 = st.columns(2)
+            new_desig = col4.text_input("New Designation", value=emp_data.get('Designation', ''))
+            target_level = col5.selectbox("Target Level", list(PAY_MATRIX.keys()))
+            
+            # Math Logic
+            notional_pay = math.ceil((old_basic * 1.03) / 100) * 100
+            final_basic, new_idx = find_cell_in_level(target_level, notional_pay)
+            next_date = get_next_increment_date(promo_date)
+            
+            st.write(f"**New Basic Pay:** ₹{final_basic} (Level {target_level})")
+            
+            if st.form_submit_button("Update & Generate"):
+                # [span_4](start_span)[span_5](start_span)Database Update[span_4](end_span)[span_5](end_span)
+                db.collection("employees").document(emp_data['id']).update({
+                    "Basic Pay": final_basic,
+                    "Level": target_level,
+                    "Designation": new_desig
                 })
-                st.success("Karmchari FIT mark ho gaya!"); st.rerun()
+                
+                # [span_6](start_span)[span_7](start_span)History Save[span_6](end_span)[span_7](end_span)
+                db.collection("promotion_history").add({
+                    "PF": selected_pf, "Name": emp_data['Employee Name'], 
+                    "NewBasic": final_basic, "Date": str(promo_date), "Timestamp": datetime.now()
+                })
+                
+                # Word Mapping
+                mapping = {
+                    "PFNUMBER": selected_pf, "EMPLOYEENAME": emp_data.get('Employee Name in Hindi', emp_data['Employee Name']),
+                    "OLDBASICPAY": old_basic, "NEWBASICPAY": final_basic, "STATION": emp_data.get('STATION', 'SGAM'),
+                    "PROMOTIONDATE": promo_date.strftime("%d.%m.%Y"), "PROMOTIONORDERNUMBER": order_no,
+                    "OLDLEVEL": emp_data.get('Level', '1'), "NEWLEVEL": target_level, "NEXTINCRDATE": next_date,
+                    "MROUND100OLDBASICPAY*103%": notional_pay
+                }
+                
+                path = os.path.join("assets", "General Promotion MACP temp.docx")
+                st.session_state.promo_file = generate_docx(path, mapping)
+                st.success("Record updated successfully!")
+                st.rerun()
 
-        st.subheader("📑 Full History")
-        st.dataframe(df_sick[['Name', 'PF_Number', 'MemoType', 'StartDate', 'Status', 'ReturnDate']], use_container_width=True)
+    if 'promo_file' in st.session_state:
+        st.download_button("📥 Download Memo", st.session_state.promo_file, f"Promotion_{selected_pf}.docx")
+
+with tab2:
+    hist = db.collection("promotion_history").order_by("Timestamp", direction=firestore.Query.DESCENDING).stream()
+    st.dataframe(pd.DataFrame([d.to_dict() for d in hist]), use_container_width=True)
