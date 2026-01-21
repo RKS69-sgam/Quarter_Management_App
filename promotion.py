@@ -32,23 +32,20 @@ if not st.session_state.auth:
 def init_db():
     if not firebase_admin._apps:
         try:
-            # Pehle Streamlit Secrets check karein
             if "firebase_config" in st.secrets:
                 cred_dict = dict(st.secrets["firebase_config"])
                 cred_dict["private_key"] = cred_dict["private_key"].replace("\\n", "\n")
                 cred = credentials.Certificate(cred_dict)
             else:
-                # Local testing ke liye JSON file
                 cred = credentials.Certificate('sgamoffice-firebase-adminsdk-fbsvc-253915b05b.json')
             firebase_admin.initialize_app(cred)
         except Exception as e:
-            st.error(f"Firebase Init Error: {e}")
-            st.stop()
+            st.error(f"Firebase Init Error: {e}"); st.stop()
     return firestore.client()
 
 db = init_db()
 
-# --- 2. PAY MATRIX & LOGIC ---
+# --- 2. PAY MATRIX DATA ---
 PAY_MATRIX = {
     "1": [18000, 18500, 19100, 19700, 20300, 20900, 21500, 22100, 22800, 23500],
     "2": [19900, 20500, 21100, 21700, 22400, 23100, 23800, 24500, 25200, 26000],
@@ -59,8 +56,8 @@ PAY_MATRIX = {
     "7": [44900, 46200, 47600, 49000, 50500, 52000, 53600, 55200, 56900, 58600]
 }
 
+# --- 3. HELPER FUNCTIONS ---
 def get_next_increment_date(promo_date):
-    # Rule: <= 30 June -> Jan | > 30 June -> July
     return f"01/01/{promo_date.year + 1}" if promo_date.month <= 6 else f"01/07/{promo_date.year + 1}"
 
 def find_cell_in_level(level, target_val):
@@ -68,12 +65,28 @@ def find_cell_in_level(level, target_val):
     for val in cells:
         if val >= target_val:
             idx = cells.index(val) + 1
-            # Next Index Basic
-            next_val = cells[cells.index(val)+1] if (cells.index(val)+1) < len(cells) else val
-            return val, idx, next_val
-    return target_val, 1, target_val
+            return val, idx
+    return target_val, 1
 
-# --- 3. UI & PROCESSING ---
+def generate_docx(template_path, data):
+    if not os.path.exists(template_path): return None
+    doc = Document(template_path)
+    for p in list(doc.paragraphs):
+        for k, v in data.items():
+            if f"[{k}]" in p.text:
+                p.text = p.text.replace(f"[{k}]", str(v))
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    for k, v in data.items():
+                        if f"[{k}]" in p.text:
+                            p.text = p.text.replace(f"[{k}]", str(v))
+    bio = io.BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
+
+# --- 4. MAIN UI ---
 tab1, tab2 = st.tabs(["🚀 Promotion Process", "📜 History Report"])
 
 emp_docs = db.collection("employees").stream()
@@ -81,15 +94,19 @@ df_emp = pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in emp_docs])
 
 with tab1:
     if not df_emp.empty:
-        selected_pf = st.selectbox("Select PF Number", df_emp['PF Number'].unique())
+        # SEARCH BY NAME OR PF
+        search_options = df_emp.apply(lambda r: f"{r['Employee Name']} ({r['PF Number']})", axis=1).tolist()
+        selected_option = st.selectbox("Search Employee (Name or PF Number)", search_options)
+        
+        # Extract PF from selection
+        selected_pf = selected_option.split('(')[-1].strip(')')
         emp_data = df_emp[df_emp['PF Number'] == selected_pf].iloc[0]
 
         with st.form("promo_form"):
-            st.subheader(f"Employee: {emp_data['Employee Name']}")
+            st.subheader(f"Promotion for: {emp_data['Employee Name']}")
             c1, c2, c3 = st.columns(3)
             
-            # Form Fields
-            old_basic = c1.number_input("Old Basic Pay (Editable)", value=float(emp_data.get('Basic Pay', 0)))
+            old_basic = c1.number_input("Old Basic Pay", value=float(emp_data.get('Basic Pay', 0)))
             promo_date = c2.date_input("Promotion Date", value=datetime.now())
             order_no = c3.text_input("Order Number")
             
@@ -97,32 +114,45 @@ with tab1:
             new_desig = c4.text_input("New Designation", value=emp_data.get('Designation', ''))
             target_lvl = c5.selectbox("Select New Level", list(PAY_MATRIX.keys()), index=1)
 
-            # Calculation Logic
-            # Notional Increment 3% rounded to nearest 100
+            # Calculation
             notional = math.ceil((old_basic * 1.03) / 100) * 100
-            final_basic, new_idx, next_incr_pay = find_cell_in_level(target_lvl, notional)
+            final_basic, new_idx = find_cell_in_level(target_lvl, notional)
             next_date = get_next_increment_date(promo_date)
 
-            st.info(f"Summary: New Basic ₹{final_basic} | Next Increment Date: {next_date}")
+            st.write(f"**Calculated New Basic:** ₹{final_basic}")
 
-            if st.form_submit_button("Generate & Update Database"):
-                # 1. Update Employee Record
+            if st.form_submit_button("Update & Generate"):
+                # Database Updates
                 db.collection("employees").document(emp_data['id']).update({
-                    "Basic Pay": final_basic,
-                    "Level": target_lvl,
-                    "Designation": new_desig,
-                    "LastPromotionDate": str(promo_date)
+                    "Basic Pay": final_basic, "Level": target_lvl, "Designation": new_desig
                 })
-                
-                # 2. History Entry
                 db.collection("promotion_history").add({
-                    "PF": selected_pf, "Name": emp_data['Employee Name'],
-                    "OldBasic": old_basic, "NewBasic": final_basic,
-                    "Date": str(promo_date), "Timestamp": datetime.now()
+                    "PF": selected_pf, "Name": emp_data['Employee Name'], 
+                    "NewBasic": final_basic, "Date": str(promo_date), "Timestamp": datetime.now()
                 })
                 
-                st.success("Record updated successfully!")
+                # Document Generation
+                mapping = {
+                    "PFNUMBER": selected_pf, 
+                    "EMPLOYEENAME": emp_data.get('Employee Name in Hindi', emp_data['Employee Name']),
+                    "OLDBASICPAY": old_basic, "NEWBASICPAY": final_basic,
+                    "PROMOTIONDATE": promo_date.strftime("%d.%m.%Y"), 
+                    "PROMOTIONORDERNUMBER": order_no,
+                    "OLDLEVEL": emp_data.get('Level', '1'), 
+                    "NEWLEVEL": target_lvl, 
+                    "NEXTINCRDATE": next_date,
+                    "MROUND100OLDBASICPAY*103%": notional,
+                    "STATION": emp_data.get('STATION', 'SGAM')
+                }
+                
+                path = os.path.join("assets", "General Promotion MACP temp.docx")
+                st.session_state.promo_file = generate_docx(path, mapping)
+                st.session_state.file_name = f"Promotion_{emp_data['Employee Name']}.docx"
+                st.success("Record Updated!")
                 st.rerun()
+
+    if 'promo_file' in st.session_state:
+        st.download_button("📥 Download Promotion Memo", st.session_state.promo_file, st.session_state.file_name)
 
 with tab2:
     st.subheader("Promotion Logs")
