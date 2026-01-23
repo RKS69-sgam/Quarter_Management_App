@@ -25,7 +25,7 @@ def check_password():
         return False
     return True
 
-# --- 2. EXTENDED PAY MATRIX (LEVEL 1 TO 8) ---
+# --- 2. DATA TABLES (LEVEL 1 TO 8) ---
 PAY_LEVEL_MAP = {
     "1": {"PB": "5200-20200", "GP": "1800"},
     "2": {"PB": "5200-20200", "GP": "1900"},
@@ -74,7 +74,6 @@ def init_db():
             cred_dict["private_key"] = cred_dict["private_key"].replace("\\n", "\n")
             cred = credentials.Certificate(cred_dict)
         else:
-            # Fallback for local testing
             cred = credentials.Certificate('sgamoffice-firebase-adminsdk-fbsvc-253915b05b.json')
         firebase_admin.initialize_app(cred)
     return firestore.client()
@@ -84,90 +83,99 @@ if check_password():
     db = init_db()
     tab1, tab2 = st.tabs(["🚀 Promotion Entry", "📊 Promotion History Report"])
 
-    # Fetch all employees
     docs = db.collection("employees").stream()
     emp_list = [d.to_dict() | {"id": d.id} for d in docs]
     df_emp = pd.DataFrame(emp_list)
     
-    # --- TAB 1: PROMOTION LOGIC ---
     with tab1:
         if not df_emp.empty:
             search_list = df_emp.apply(lambda r: f"{r['Employee Name']} ({str(r.get('PF Number','')).split('.')[0]})", axis=1).tolist()
             sel_emp_str = st.selectbox("Search Employee", search_list)
             emp_data = df_emp[df_emp['Employee Name'] == sel_emp_str.split(' (')[0]].iloc[0]
             
-            promo_type = st.radio("Choose Option", ["On Date Promotion", "Promotion On Next Increment"], horizontal=True)
+            promo_option = st.radio("Choose Option", ["On Date Promotion", "Promotion On Next Increment"], horizontal=True)
             
-            with st.form("promo_fixation_form"):
+            with st.form("promo_fixation_v3"):
                 old_pay = int(float(emp_data.get('BASIC PAY', 18000)))
                 old_lvl = str(int(float(emp_data.get('PAY LEVEL', 1))))
                 
                 c1, c2, c3 = st.columns(3)
                 curr_pay = c1.number_input("Current Basic Pay", value=old_pay)
-                fix_date = c2.date_input("Fixation/Order Date", value=datetime.now())
+                fix_date = c2.date_input("Fixation Date", value=datetime.now())
                 order_no = st.text_input("Promotion Order Number")
 
                 col1, col2 = st.columns(2)
                 with col1:
-                    st.info("Current (Old) Status")
+                    st.info("Old Status")
                     old_desig = emp_data.get('Designation', '')
                     old_gp = PAY_LEVEL_MAP.get(old_lvl, {}).get("GP", "1800")
                     _, old_idx = find_details(old_lvl, curr_pay)
-                    st.write(f"GP: **{old_gp}** | Matrix Index: **{old_idx}**")
+                    st.write(f"GP: **{old_gp}** | Index: **{old_idx}**")
                 
                 with col2:
-                    st.success("Promotion (New) Status")
+                    st.success("New Status")
                     all_desigs = sorted(list(set(df_emp['Designation'].dropna())))
                     new_lvl = st.selectbox("Select New Level", list(PAY_LEVEL_MAP.keys()), index=int(old_lvl) if int(old_lvl)<8 else 7)
                     new_gp = PAY_LEVEL_MAP[new_lvl]["GP"]
                     def_idx = (all_desigs.index(old_desig)-1) if old_desig in all_desigs and all_desigs.index(old_desig)>0 else 0
-                    new_desig = st.selectbox("New Designation (NEWDESIGNATION)", all_desigs, index=def_idx)
+                    new_desig = st.selectbox("New Designation", all_desigs, index=def_idx)
 
-                # Fixation Calculation
-                notional = math.ceil((curr_pay * 1.03) / 100) * 100
-                final_pay, new_idx = find_details(new_lvl, notional)
+                # Calculations
+                notional_promo = math.ceil((curr_pay * 1.03) / 100) * 100
+                final_pay, new_idx = find_details(new_lvl, notional_promo)
+                
+                # Next Increment Logic
                 inc_date = f"01.07.{fix_date.year + (1 if fix_date.month > 6 else 0)}" if fix_date.month <= 6 else f"01.01.{fix_date.year + 1}"
+                # Calculation for [MROUND100ONEWBASICPAY*103%]
+                next_inc_pay_math = math.ceil((final_pay * 1.03) / 100) * 100
 
-                if st.form_submit_button("Update & Generate Document"):
+                if st.form_submit_button("Process & Generate"):
                     hindi_name = emp_data.get('Employee Name in Hindi', emp_data['Employee Name'])
+                    emp_station = emp_data.get('STATION', 'N/A')
                     
-                    # 1. Update Employee Database
+                    # 1. Update DB
                     db.collection("employees").document(emp_data['id']).update({
                         "BASIC PAY": int(final_pay),
                         "PAY LEVEL": new_lvl,
                         "Designation": new_desig,
-                        "Posting Status": new_desig  # Updating Posting Status as requested
+                        "Posting Status": new_desig
                     })
                     
-                    # 2. Add to History Collection
+                    # 2. History record
                     db.collection("promotion_history").add({
-                        "PF_Number": emp_data.get('PF Number'),
+                        "PF_Number": str(emp_data.get('PF Number','')).split('.')[0],
                         "Name": hindi_name,
-                        "Type": promo_type,
-                        "Old_GP": old_gp,
+                        "Type": promo_option,
                         "New_GP": new_gp,
                         "Order_No": order_no,
-                        "Date": fix_date.strftime("%Y-%m-%d"),
                         "timestamp": datetime.now()
                     })
 
-                    # 3. Generate Document
+                    # 3. Word Mapping
                     mapping = {
                         "PFNUMBER": str(emp_data.get('PF Number','')).split('.')[0],
                         "EMPLOYEENAME": hindi_name,
-                        "OLDDESIGNATION": old_desig, "NEWDESIGNATION": new_desig,
-                        "OLDGP": old_gp, "NEWGP": new_gp,
-                        "OLDBASICPAY": int(curr_pay), "NEWBASICPAY": int(final_pay),
-                        "OLDLEVEL": old_lvl, "NEWLEVEL": new_lvl,
-                        "OLDPAYBAND": PAY_LEVEL_MAP[old_lvl]["PB"], "NEWPAYBAND": PAY_LEVEL_MAP[new_lvl]["PB"],
-                        "OLDINDEX": old_idx, "NEWINDEX": new_idx,
+                        "STATION": emp_station,
+                        "OLDDESIGNATION": old_desig, 
+                        "NEWDESIGNATION": new_desig,
+                        "OLDGP": old_gp, 
+                        "NEWGP": new_gp,
+                        "OLDBASICPAY": int(curr_pay), 
+                        "NEWBASICPAY": int(final_pay),
+                        "OLDLEVEL": old_lvl, 
+                        "NEWLEVEL": new_lvl,
+                        "OLDPAYBAND": PAY_LEVEL_MAP[old_lvl]["PB"], 
+                        "NEWPAYBAND": PAY_LEVEL_MAP[new_lvl]["PB"],
+                        "OLDINDEX": old_idx, 
+                        "NEWINDEX": new_idx,
                         "PROMOTIONORDERNUMBER": order_no,
                         "PROMOTIONDATE": fix_date.strftime("%d.%m.%Y"),
                         "NEXTINCRDATE": inc_date,
-                        "MROUND100OLDBASICPAY*103%": int(notional)
+                        "MROUND100OLDBASICPAY*103%": int(notional_promo),
+                        "MROUND100ONEWBASICPAY*103%": int(next_inc_pay_math)
                     }
 
-                    template_name = "General Promotion MACP temp.docx" if promo_type == "On Date Promotion" else "On Increment Promotion temp.docx"
+                    template_name = "General Promotion MACP temp.docx" if promo_option == "On Date Promotion" else "On Increment Promotion temp.docx"
                     t_path = os.path.join("assets", template_name)
                     
                     if os.path.exists(t_path):
@@ -175,37 +183,25 @@ if check_password():
                         powerful_replace(doc, mapping)
                         bio = io.BytesIO()
                         doc.save(bio)
-                        # File Name: Sunil_Kumar_Prajapati_1900.docx
                         safe_name = "".join([c if c.isalnum() else "_" for c in emp_data['Employee Name']])
                         st.session_state.file_output = bio.getvalue()
                         st.session_state.file_name = f"{safe_name}_{new_gp}.docx"
-                        st.success("Database Updated and Document Prepared!")
+                        st.success("Promotion Processed!")
                         st.rerun()
-                    else:
-                        st.error(f"Template not found at {t_path}")
 
         if "file_output" in st.session_state:
-            st.download_button(f"📥 Download {st.session_state.file_name}", 
-                             st.session_state.file_output, 
-                             st.session_state.file_name)
+            st.download_button(f"📥 Download {st.session_state.file_name}", st.session_state.file_output, st.session_state.file_name)
 
-    # --- TAB 2: HISTORY REPORT ---
+    # --- TAB 2: HISTORY ---
     with tab2:
-        st.header("📋 Promotion History Log")
+        st.header("📋 History Log")
         hist_docs = db.collection("promotion_history").order_by("timestamp", direction=firestore.Query.DESCENDING).stream()
-        hist_data = [h.to_dict() for h in hist_docs]
-        
-        if hist_data:
-            df_hist = pd.DataFrame(hist_data)
-            # Filter by Promotion Type
-            filter_type = st.multiselect("Filter by Promotion Type", df_hist['Type'].unique(), default=df_hist['Type'].unique())
-            filtered_df = df_hist[df_hist['Type'].isin(filter_type)]
-            
-            st.dataframe(filtered_df[['Name', 'PF_Number', 'Old_GP', 'New_GP', 'Type', 'Order_No', 'Date']], use_container_width=True)
-            
-            # Export to Excel
+        hist_list = [h.to_dict() for h in hist_docs]
+        if hist_list:
+            df_h = pd.DataFrame(hist_list)
+            if 'timestamp' in df_h.columns:
+                df_h['timestamp'] = pd.to_datetime(df_h['timestamp']).dt.tz_localize(None)
+            st.dataframe(df_h, use_container_width=True)
             towrite = io.BytesIO()
-            filtered_df.to_excel(towrite, index=False)
-            st.download_button("📂 Export History to Excel", towrite.getvalue(), "Promotion_History.xlsx")
-        else:
-            st.info("No promotion history found yet.")
+            df_h.to_excel(towrite, index=False, engine='openpyxl')
+            st.download_button("📂 Export Excel", towrite.getvalue(), "Promotion_History.xlsx")
