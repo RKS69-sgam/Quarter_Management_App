@@ -9,7 +9,7 @@ from docx import Document
 import io
 
 # --- 1. CONFIG & SECURITY ---
-st.set_page_config(page_title="Railway Secure Promotion", layout="wide")
+st.set_page_config(page_title="Railway Secure Promotion & Reports", layout="wide")
 
 def check_password():
     if "password_correct" not in st.session_state:
@@ -25,7 +25,7 @@ def check_password():
         return False
     return True
 
-# --- 2. EXTENDED DATA TABLES (LEVEL 1 TO 8) ---
+# --- 2. DATA TABLES (LEVEL 1 TO 8) ---
 PAY_LEVEL_MAP = {
     "1": {"PB": "5200-20200", "GP": "1800"},
     "2": {"PB": "5200-20200", "GP": "1900"},
@@ -56,13 +56,10 @@ def find_details(level, pay):
     return int(pay), 1
 
 def powerful_replace(doc, data):
-    """Deep search and replace in paragraphs and tables"""
     for k, v in data.items():
         tag = f"[{k}]"
-        # Search Paragraphs
         for p in doc.paragraphs:
             if tag in p.text: p.text = p.text.replace(tag, str(v))
-        # Search Tables
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
@@ -84,8 +81,14 @@ def init_db():
 # --- 4. MAIN APP ---
 if check_password():
     db = init_db()
+    
+    # Navigation Tabs
+    tab1, tab2 = st.tabs(["🚀 Promotion Fixation", "📊 Employee Report"])
+
+    # Load Data
     docs = db.collection("employees").stream()
-    data_list, desigs = [], []
+    data_list = []
+    desigs = []
     for d in docs:
         item = d.to_dict(); item['id'] = d.id
         data_list.append(item)
@@ -94,93 +97,92 @@ if check_password():
     df = pd.DataFrame(data_list)
     sorted_desigs = sorted(list(set(desigs)))
 
-    st.title("📋 Railway Promotion Fixation System (L1-L8)")
-
-    if not df.empty:
-        search_list = df.apply(lambda r: f"{r['Employee Name']} ({str(r.get('PF Number','')).split('.')[0]})", axis=1).tolist()
-        sel_emp_str = st.selectbox("Search Employee", search_list)
-        emp_data = df[df['Employee Name'] == sel_emp_str.split(' (')[0]].iloc[0]
-        
-        with st.form("fixation_form_v_final"):
-            old_pay = int(float(emp_data.get('BASIC PAY', 18000)))
-            old_lvl = str(int(float(emp_data.get('PAY LEVEL', 1))))
+    # --- TAB 1: FIXATION ---
+    with tab1:
+        st.header("New Promotion/MACP Entry")
+        if not df.empty:
+            search_list = df.apply(lambda r: f"{r['Employee Name']} ({str(r.get('PF Number','')).split('.')[0]})", axis=1).tolist()
+            sel_emp_str = st.selectbox("Search Employee", search_list)
+            emp_data = df[df['Employee Name'] == sel_emp_str.split(' (')[0]].iloc[0]
             
-            c1, c2, c3 = st.columns(3)
-            curr_pay = c1.number_input("Current Basic Pay", value=old_pay)
-            fix_date = c2.date_input("Fixation Date", value=datetime.now())
-            order_no = c3.text_input("Order Number")
+            with st.form("fixation_form_v_final"):
+                old_pay = int(float(emp_data.get('BASIC PAY', 18000)))
+                old_lvl = str(int(float(emp_data.get('PAY LEVEL', 1))))
+                
+                c1, c2, c3 = st.columns(3)
+                curr_pay = c1.number_input("Current Basic Pay", value=old_pay)
+                fix_date = c2.date_input("Fixation Date", value=datetime.now())
+                order_no = c3.text_input("Order Number")
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.subheader("Old Status")
-                old_desig = emp_data.get('Designation', '')
-                st.text_input("Designation", old_desig, disabled=True)
-                old_gp = PAY_LEVEL_MAP.get(old_lvl, {}).get("GP", "")
-                _, old_idx = find_details(old_lvl, curr_pay)
-                st.write(f"Old Index: **{old_idx}** | Old GP: **{old_gp}**")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.info("Old Status")
+                    old_desig = emp_data.get('Designation', '')
+                    old_gp = PAY_LEVEL_MAP.get(old_lvl, {}).get("GP", "")
+                    _, old_idx = find_details(old_lvl, curr_pay)
+                    st.write(f"GP: **{old_gp}** | Index: **{old_idx}**")
+                
+                with col2:
+                    st.success("New Status")
+                    new_lvl = st.selectbox("New Level", list(PAY_LEVEL_MAP.keys()), index=int(old_lvl) if int(old_lvl) < 8 else 7)
+                    new_gp = PAY_LEVEL_MAP.get(new_lvl, {}).get("GP", "")
+                    def_d_idx = (sorted_desigs.index(old_desig)-1) if old_desig in sorted_desigs and sorted_desigs.index(old_desig)>0 else 0
+                    new_desig = st.selectbox("New Designation", sorted_desigs, index=def_d_idx)
+
+                # Fixation Logic
+                notional = math.ceil((curr_pay * 1.03) / 100) * 100
+                final_pay, new_idx = find_details(new_lvl, notional)
+                inc_date = f"01.07.{fix_date.year + (1 if fix_date.month > 6 else 0)}" if fix_date.month <= 6 else f"01.01.{fix_date.year + 1}"
+
+                if st.form_submit_button("Update & Generate Order"):
+                    hindi_name = emp_data.get('Employee Name in Hindi', emp_data['Employee Name'])
+                    db.collection("employees").document(emp_data['id']).update({
+                        "BASIC PAY": int(final_pay),
+                        "PAY LEVEL": new_lvl,
+                        "Designation": new_desig
+                    })
+                    
+                    mapping = {
+                        "PFNUMBER": str(emp_data.get('PF Number','')).split('.')[0],
+                        "EMPLOYEENAME": hindi_name,
+                        "OLDDESIGNATION": old_desig,
+                        "NEWDESIGNATION": new_desig,
+                        "STATION": emp_data.get('STATION', 'GNDI'),
+                        "OLDGP": old_gp, "NEWGP": new_gp,
+                        "OLDBASICPAY": int(curr_pay), "NEWBASICPAY": int(final_pay),
+                        "OLDLEVEL": old_lvl, "NEWLEVEL": new_lvl,
+                        "OLDPAYBAND": PAY_LEVEL_MAP[old_lvl]["PB"], "NEWPAYBAND": PAY_LEVEL_MAP[new_lvl]["PB"],
+                        "OLDINDEX": old_idx, "NEWINDEX": new_idx,
+                        "PROMOTIONORDERNUMBER": order_no,
+                        "PROMOTIONDATE": fix_date.strftime("%d.%m.%Y"),
+                        "NEXTINCRDATE": inc_date,
+                        "MROUND100OLDBASICPAY*103%": int(notional)
+                    }
+
+                    t_path = os.path.join("assets", "General Promotion MACP temp.docx")
+                    if os.path.exists(t_path):
+                        doc = Document(t_path)
+                        powerful_replace(doc, mapping)
+                        bio = io.BytesIO()
+                        doc.save(bio)
+                        st.session_state.word_file = bio.getvalue()
+                        st.success("File Ready!")
+                        st.rerun()
+
+        if "word_file" in st.session_state:
+            st.download_button("📥 Download Document", st.session_state.word_file, "Fixation_Done.docx")
+
+    # --- TAB 2: REPORT ---
+    with tab2:
+        st.header("📋 Employee Master Report")
+        if not df.empty:
+            # Cleaning DF for display
+            display_df = df[['PF Number', 'Employee Name', 'Employee Name in Hindi', 'Designation', 'PAY LEVEL', 'BASIC PAY', 'STATION']].copy()
+            st.dataframe(display_df, use_container_width=True)
             
-            with col2:
-                st.subheader("New Status")
-                next_l_idx = int(old_lvl) if int(old_lvl) < 8 else 7
-                new_lvl = st.selectbox("New Level", list(PAY_LEVEL_MAP.keys()), index=next_l_idx)
-                new_gp = PAY_LEVEL_MAP.get(new_lvl, {}).get("GP", "")
-                
-                def_d_idx = (sorted_desigs.index(old_desig)-1) if old_desig in sorted_desigs and sorted_desigs.index(old_desig)>0 else 0
-                new_desig = st.selectbox("New Designation", sorted_desigs, index=def_idx if 'def_idx' in locals() else def_d_idx)
-
-            # Fixation Maths
-            notional = math.ceil((curr_pay * 1.03) / 100) * 100
-            final_pay, new_idx = find_details(new_lvl, notional)
-            
-            # Increment logic
-            inc_month = "01.07" if fix_date.month <= 6 else "01.01"
-            inc_year = fix_date.year + (1 if fix_date.month > 6 else 0)
-            inc_date_str = f"{inc_month}.{inc_year}"
-            inc_pay, _ = find_details(new_lvl, final_pay * 1.03)
-
-            if st.form_submit_button("Update & Export Document"):
-                hindi_name = emp_data.get('Employee Name in Hindi', emp_data['Employee Name'])
-                
-                # Database Update
-                db.collection("employees").document(emp_data['id']).update({
-                    "BASIC PAY": int(final_pay),
-                    "PAY LEVEL": new_lvl,
-                    "Designation": new_desig
-                })
-                
-                # FULL MAPPING (Including [OLDGP] and [NEWGP])
-                mapping = {
-                    "PFNUMBER": str(emp_data.get('PF Number','')).split('.')[0],
-                    "EMPLOYEENAME": hindi_name,
-                    "OLDDESIGNATION": old_desig,
-                    "NEWDESIGNATION": new_desig,
-                    "STATION": emp_data.get('STATION', 'GNDI'),
-                    "OLDGP": old_gp,
-                    "NEWGP": new_gp,
-                    "OLDBASICPAY": int(curr_pay),
-                    "NEWBASICPAY": int(final_pay),
-                    "OLDLEVEL": old_lvl,
-                    "NEWLEVEL": new_lvl,
-                    "OLDPAYBAND": PAY_LEVEL_MAP[old_lvl]["PB"],
-                    "NEWPAYBAND": PAY_LEVEL_MAP[new_lvl]["PB"],
-                    "OLDINDEX": old_idx,
-                    "NEWINDEX": new_idx,
-                    "PROMOTIONORDERNUMBER": order_no,
-                    "PROMOTIONDATE": fix_date.strftime("%d.%m.%Y"),
-                    "NEXTINCRDATE": inc_date_str,
-                    "MROUND100OLDBASICPAY*103%": int(notional),
-                    "MROUND100ONEWBASICPAY*103%": int(inc_pay)
-                }
-
-                t_path = os.path.join("assets", "General Promotion MACP temp.docx")
-                if os.path.exists(t_path):
-                    doc = Document(t_path)
-                    powerful_replace(doc, mapping)
-                    bio = io.BytesIO()
-                    doc.save(bio)
-                    st.session_state.word_file = bio.getvalue()
-                    st.success(f"Order for {hindi_name} is ready!")
-                    st.rerun()
-
-    if "word_file" in st.session_state:
-        st.download_button("📥 Download Fixation Order", st.session_state.word_file, "Fixation_Done.docx")
+            # Export to Excel
+            towrite = io.BytesIO()
+            display_df.to_excel(towrite, index=False, header=True)
+            st.download_button("📂 Export Report to Excel", towrite.getvalue(), "Employee_Report.xlsx")
+        else:
+            st.warning("No data found in Database.")
