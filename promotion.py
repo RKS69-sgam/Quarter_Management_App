@@ -92,15 +92,20 @@ if check_password():
             sel_emp_str = st.selectbox("Search Employee", search_list)
             emp_data = df_emp[df_emp['Employee Name'] == sel_emp_str.split(' (')[0]].iloc[0]
             
+            # --- AUTO SELECT LOGIC ---
+            old_lvl_val = int(float(emp_data.get('PAY LEVEL', 1)))
+            # Auto-select next level (if level is 2, select 3)
+            auto_new_lvl = str(old_lvl_val + 1) if old_lvl_val < 8 else "8"
+            
             promo_option = st.radio("Choose Option", ["On Date Promotion", "Promotion On Next Increment"], horizontal=True)
             
-            with st.form("final_promo_form"):
+            with st.form("final_promo_form_v4"):
                 old_pay = int(float(emp_data.get('BASIC PAY', 18000)))
-                old_lvl = str(int(float(emp_data.get('PAY LEVEL', 1))))
+                old_lvl = str(old_lvl_val)
                 
                 c1, c2, c3 = st.columns(3)
                 curr_pay = c1.number_input("Current Basic Pay", value=old_pay)
-                fix_date = c2.date_input("Fixation Date", value=datetime.now())
+                fix_date = c2.date_input("Fixation / Order Date", value=datetime.now())
                 order_no = st.text_input("Order Number")
 
                 col1, col2 = st.columns(2)
@@ -108,20 +113,29 @@ if check_password():
                     old_desig = emp_data.get('Designation', '')
                     old_gp = PAY_LEVEL_MAP.get(old_lvl, {}).get("GP", "1800")
                     _, old_idx = find_details(old_lvl, curr_pay)
-                    st.info(f"Old: {old_desig} | GP: {old_gp}")
+                    st.info(f"Current: {old_desig} (L-{old_lvl})")
                 
                 with col2:
                     all_eng = sorted(list(set(df_emp['Designation'].dropna())))
                     all_hindi = sorted(list(set(df_emp['Designation in Hindi'].dropna())))
-                    new_lvl = st.selectbox("New Level", list(PAY_LEVEL_MAP.keys()), index=int(old_lvl)-1 if int(old_lvl)<8 else 7)
+                    
+                    # Applied Auto-Selection for Level
+                    new_lvl = st.selectbox("New Level", list(PAY_LEVEL_MAP.keys()), index=list(PAY_LEVEL_MAP.keys()).index(auto_new_lvl))
                     new_gp = PAY_LEVEL_MAP[new_lvl]["GP"]
-                    new_desig_eng = st.selectbox("New Designation (English)", all_eng)
+                    
+                    # Applied Auto-Selection for Designation (Next in list)
+                    try:
+                        curr_desig_idx = all_eng.index(old_desig)
+                        auto_desig_idx = curr_desig_idx - 1 if curr_desig_idx > 0 else 0 # Assuming list is Ascending (TM-4 to TM-1)
+                    except:
+                        auto_desig_idx = 0
+                        
+                    new_desig_eng = st.selectbox("New Designation (English)", all_eng, index=auto_desig_idx)
                     new_desig_hindi = st.selectbox("New Designation (Hindi)", all_hindi)
 
                 # Fixation Calculations
                 notional_general = math.ceil((curr_pay * 1.03) / 100) * 100
                 general_final_pay, general_new_idx = find_details(new_lvl, notional_general)
-                
                 val_in_new_gp, initial_new_idx = find_details(new_lvl, curr_pay)
                 double_inc_val = math.ceil((curr_pay * 1.03 * 1.03) / 100) * 100
                 final_fixation_val, revised_new_idx = find_details(new_lvl, double_inc_val)
@@ -130,24 +144,25 @@ if check_password():
                 inc_date_obj = datetime.strptime(f"01.07.{inc_year}" if fix_date.month <= 6 else f"01.01.{inc_year+1}", "%d.%m.%Y")
                 prev_day_inc = (inc_date_obj - timedelta(days=1)).strftime("%d.%m.%Y")
 
-                if st.form_submit_button("Process Promotion"):
-                    # Update Logic
+                if st.form_submit_button("Submit & Update Database"):
                     final_db_pay = final_fixation_val if promo_option == "Promotion On Next Increment" else general_final_pay
                     
+                    # --- COMPREHENSIVE DB UPDATE ---
                     db.collection("employees").document(emp_data['id']).update({
                         "BASIC PAY": int(final_db_pay),
                         "PAY LEVEL": new_lvl,
                         "Designation": new_desig_eng,
                         "Designation in Hindi": new_desig_hindi,
-                        "Posting Status": new_desig_eng
+                        "Posting status": new_desig_eng,        # Updated as requested
+                        "PROMOTION DATE": fix_date.strftime("%d.%m.%Y") # Updated as requested
                     })
                     
-                    # History
+                    # Add to History
                     db.collection("promotion_history").add({
                         "Name": emp_data['Employee Name'],
                         "PF": str(emp_data.get('PF Number','')).split('.')[0],
                         "Type": promo_option,
-                        "GP": new_gp,
+                        "Date": fix_date.strftime("%d.%m.%Y"),
                         "timestamp": datetime.now()
                     })
 
@@ -181,10 +196,11 @@ if check_password():
                         powerful_replace(doc, mapping)
                         bio = io.BytesIO()
                         doc.save(bio)
+                        # Secure Filename: Name_GP.docx
                         safe_name = "".join([c if c.isalnum() else "_" for c in emp_data['Employee Name']])
                         st.session_state.file_output = bio.getvalue()
                         st.session_state.file_name = f"{safe_name}_{new_gp}.docx"
-                        st.success("Database Updated & Document Ready!")
+                        st.success(f"Database Updated for {emp_data['Employee Name']}!")
                         st.rerun()
 
         if "file_output" in st.session_state:
@@ -201,4 +217,4 @@ if check_password():
             st.dataframe(df_h, use_container_width=True)
             towrite = io.BytesIO()
             df_h.to_excel(towrite, index=False, engine='openpyxl')
-            st.download_button("📂 Export to Excel", towrite.getvalue(), "Promotion_History.xlsx")
+            st.download_button("📂 Export to Excel", towrite.getvalue(), "Promotion_History_Log.xlsx")
