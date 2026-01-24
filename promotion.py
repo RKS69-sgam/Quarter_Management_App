@@ -25,7 +25,7 @@ def check_password():
         return False
     return True
 
-# --- 2. EXTENDED PAY MATRIX (LEVEL 1 TO 8) ---
+# --- 2. PAY MATRIX DATA ---
 PAY_LEVEL_MAP = {
     "1": {"PB": "5200-20200", "GP": "1800"},
     "2": {"PB": "5200-20200", "GP": "1900"},
@@ -48,7 +48,7 @@ PAY_MATRIX = {
     "8": [47600, 49000, 50500, 52000, 53600, 55200, 56900, 58600, 60400, 62200, 64100, 66000, 68000],
 }
 
-# --- 3. HELPER FUNCTIONS ---
+# --- 3. HELPERS ---
 def find_details(level, pay):
     cells = PAY_MATRIX.get(str(level), [])
     for val in cells:
@@ -78,12 +78,11 @@ def init_db():
         firebase_admin.initialize_app(cred)
     return firestore.client()
 
-# --- 4. MAIN APP ---
+# --- 4. MAIN ---
 if check_password():
     db = init_db()
     tab1, tab2 = st.tabs(["🚀 Promotion Entry", "📊 Promotion History Report"])
 
-    # Fetch Employees
     docs = db.collection("employees").stream()
     df_emp = pd.DataFrame([d.to_dict() | {"id": d.id} for d in docs])
     
@@ -95,7 +94,7 @@ if check_password():
             
             promo_option = st.radio("Choose Option", ["On Date Promotion", "Promotion On Next Increment"], horizontal=True)
             
-            with st.form("promo_v_final"):
+            with st.form("final_promo_form"):
                 old_pay = int(float(emp_data.get('BASIC PAY', 18000)))
                 old_lvl = str(int(float(emp_data.get('PAY LEVEL', 1))))
                 
@@ -106,63 +105,57 @@ if check_password():
 
                 col1, col2 = st.columns(2)
                 with col1:
-                    st.info("Current Status")
                     old_desig = emp_data.get('Designation', '')
                     old_gp = PAY_LEVEL_MAP.get(old_lvl, {}).get("GP", "1800")
                     _, old_idx = find_details(old_lvl, curr_pay)
-                    st.write(f"GP: **{old_gp}** | Index: **{old_idx}**")
+                    st.info(f"Old: {old_desig} | GP: {old_gp}")
                 
                 with col2:
-                    st.success("Promotion Status")
-                    all_desigs = sorted(list(set(df_emp['Designation'].dropna())))
-                    new_lvl = st.selectbox("New Level", list(PAY_LEVEL_MAP.keys()), index=int(old_lvl) if int(old_lvl)<8 else 7)
+                    all_eng = sorted(list(set(df_emp['Designation'].dropna())))
+                    all_hindi = sorted(list(set(df_emp['Designation in Hindi'].dropna())))
+                    new_lvl = st.selectbox("New Level", list(PAY_LEVEL_MAP.keys()), index=int(old_lvl)-1 if int(old_lvl)<8 else 7)
                     new_gp = PAY_LEVEL_MAP[new_lvl]["GP"]
-                    def_idx = (all_desigs.index(old_desig)-1) if old_desig in all_desigs and all_desigs.index(old_desig)>0 else 0
-                    new_desig = st.selectbox("New Designation", all_desigs, index=def_idx)
+                    new_desig_eng = st.selectbox("New Designation (English)", all_eng)
+                    new_desig_hindi = st.selectbox("New Designation (Hindi)", all_hindi)
 
-                # --- ADVANCED CALCULATIONS ---
-                # 1. On Date (General) Logic
+                # Fixation Calculations
                 notional_general = math.ceil((curr_pay * 1.03) / 100) * 100
                 general_final_pay, general_new_idx = find_details(new_lvl, notional_general)
-
-                # 2. Option Logic (Next Increment)
+                
                 val_in_new_gp, initial_new_idx = find_details(new_lvl, curr_pay)
                 double_inc_val = math.ceil((curr_pay * 1.03 * 1.03) / 100) * 100
                 final_fixation_val, revised_new_idx = find_details(new_lvl, double_inc_val)
                 
-                # Dates
                 inc_year = fix_date.year + (1 if fix_date.month > 6 else 0)
                 inc_date_obj = datetime.strptime(f"01.07.{inc_year}" if fix_date.month <= 6 else f"01.01.{inc_year+1}", "%d.%m.%Y")
                 prev_day_inc = (inc_date_obj - timedelta(days=1)).strftime("%d.%m.%Y")
 
-                if st.form_submit_button("Update & Generate Order"):
-                    hindi_name = emp_data.get('Employee Name in Hindi', emp_data['Employee Name'])
-                    
-                    # DB UPDATE
+                if st.form_submit_button("Process Promotion"):
+                    # Update Logic
                     final_db_pay = final_fixation_val if promo_option == "Promotion On Next Increment" else general_final_pay
+                    
                     db.collection("employees").document(emp_data['id']).update({
                         "BASIC PAY": int(final_db_pay),
                         "PAY LEVEL": new_lvl,
-                        "Designation": new_desig,
-                        "Posting Status": new_desig
+                        "Designation": new_desig_eng,
+                        "Designation in Hindi": new_desig_hindi,
+                        "Posting Status": new_desig_eng
                     })
                     
-                    # HISTORY
+                    # History
                     db.collection("promotion_history").add({
-                        "PF_Number": str(emp_data.get('PF Number','')).split('.')[0],
-                        "Name": hindi_name,
+                        "Name": emp_data['Employee Name'],
+                        "PF": str(emp_data.get('PF Number','')).split('.')[0],
                         "Type": promo_option,
-                        "New_GP": new_gp,
-                        "Order_No": order_no,
+                        "GP": new_gp,
                         "timestamp": datetime.now()
                     })
 
-                    # MAPPING
                     mapping = {
                         "PFNUMBER": str(emp_data.get('PF Number','')).split('.')[0],
-                        "EMPLOYEENAME": hindi_name,
+                        "EMPLOYEENAME": emp_data.get('Employee Name in Hindi', emp_data['Employee Name']),
                         "STATION": emp_data.get('STATION', 'N/A'),
-                        "OLDDESIGNATION": old_desig, "NEWDESIGNATION": new_desig,
+                        "OLDDESIGNATION": old_desig, "NEWDESIGNATION": new_desig_hindi,
                         "OLDGP": old_gp, "NEWGP": new_gp,
                         "OLDBASICPAY": int(curr_pay), 
                         "NEWBASICPAY": general_final_pay if promo_option == "On Date Promotion" else val_in_new_gp,
@@ -177,8 +170,7 @@ if check_password():
                         "OLDBASICKPAY=<INNEWGP": val_in_new_gp,
                         "MROUND100OLDBASICPAY*103%": int(notional_general),
                         "MROUND100OLDBASICPAY*103%*103%": double_inc_val,
-                        "MROUND100OLDBASICPAY*103%*103%=<INNEWGP": final_fixation_val,
-                        "MROUND100ONEWBASICPAY*103%": math.ceil((general_final_pay * 1.03)/100)*100
+                        "MROUND100OLDBASICPAY*103%*103%=<INNEWGP": final_fixation_val
                     }
 
                     t_name = "General Promotion MACP temp.docx" if promo_option == "On Date Promotion" else "On Increment Promotion temp.docx"
@@ -192,15 +184,14 @@ if check_password():
                         safe_name = "".join([c if c.isalnum() else "_" for c in emp_data['Employee Name']])
                         st.session_state.file_output = bio.getvalue()
                         st.session_state.file_name = f"{safe_name}_{new_gp}.docx"
-                        st.success("Process Complete!")
+                        st.success("Database Updated & Document Ready!")
                         st.rerun()
 
         if "file_output" in st.session_state:
             st.download_button(f"📥 Download {st.session_state.file_name}", st.session_state.file_output, st.session_state.file_name)
 
-    # --- TAB 2: HISTORY ---
     with tab2:
-        st.header("📋 History Report")
+        st.header("📋 Promotion History Report")
         h_docs = db.collection("promotion_history").order_by("timestamp", direction=firestore.Query.DESCENDING).stream()
         h_list = [h.to_dict() for h in h_docs]
         if h_list:
@@ -210,4 +201,4 @@ if check_password():
             st.dataframe(df_h, use_container_width=True)
             towrite = io.BytesIO()
             df_h.to_excel(towrite, index=False, engine='openpyxl')
-            st.download_button("📂 Export Excel", towrite.getvalue(), "Promotion_History.xlsx")
+            st.download_button("📂 Export to Excel", towrite.getvalue(), "Promotion_History.xlsx")
