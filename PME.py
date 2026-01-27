@@ -17,7 +17,6 @@ def check_password():
         user = st.text_input("Username")
         pwd = st.text_input("Password", type="password")
         if st.button("Login"):
-            # Set your credentials here
             if user == "admin" and pwd == "sgam@2026":
                 st.session_state["password_correct"] = True
                 st.rerun()
@@ -53,6 +52,7 @@ def get_safe_date(date_val):
     try:
         if hasattr(date_val, 'to_datetime'):
             return date_val.to_datetime().replace(tzinfo=None)
+        # Handle both DD/MM/YYYY and other standard formats
         return pd.to_datetime(date_val, dayfirst=True).to_pydatetime().replace(tzinfo=None)
     except: return None
 
@@ -63,21 +63,23 @@ def calculate_next_pme(last_pme_raw, dob_raw, medical_cat):
     
     cat = str(medical_cat).upper().strip()
     
-    # Safety Category Logic (A1, A2, A3)
+    # 1. Safety Category Logic (A1, A2, A3)
     if any(x in cat for x in ["A1", "A2", "A3"]):
         if not last_pme: return "MISSING_DATE"
         age_at_pme = relativedelta(last_pme, dob).years
+        # Rules: <45 (4yr), 45-55 (2yr), 55+ (1yr)
         if age_at_pme < 45: interval = 4
         elif 45 <= age_at_pme < 55: interval = 2
         else: interval = 1
         return last_pme + relativedelta(years=interval)
     
-    # Non-Safety/Milestone Logic (B1, B2)
+    # 2. B1 Category Logic (First at 45, then every 5 years)
     elif "B" in cat:
         due_45 = dob + relativedelta(years=45)
         if not last_pme: return due_45
         age_at_pme = relativedelta(last_pme, dob).years
-        return due_45 if age_at_pme < 45 else last_pme + relativedelta(years=5)
+        if age_at_pme < 45: return due_45
+        else: return last_pme + relativedelta(years=5)
             
     return None
 
@@ -107,9 +109,10 @@ def replace_placeholders(doc, mapping):
             placeholder = "{{ " + str(key) + " }}"
             if placeholder in p.text:
                 full_text = "".join(run.text for run in p.runs)
-                new_text = full_text.replace(placeholder, str(val))
-                for i, run in enumerate(p.runs):
-                    run.text = new_text if i == 0 else ""
+                if placeholder in full_text:
+                    new_text = full_text.replace(placeholder, str(val))
+                    for i, run in enumerate(p.runs):
+                        run.text = new_text if i == 0 else ""
 
 # --- 3. MAIN INTERFACE ---
 if check_password():
@@ -119,7 +122,7 @@ if check_password():
         df_emp = pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in docs])
         
         # --- 📢 ALERT DASHBOARD ---
-        st.subheader("⚠️ PME Alerts (Next 15 Days)")
+        st.subheader("⚠️ PME Alerts Dashboard (Next 15 Days)")
         if not df_emp.empty:
             today = datetime.now()
             window = today + timedelta(days=15)
@@ -128,15 +131,19 @@ if check_password():
             for _, row in df_emp.iterrows():
                 nxt = calculate_next_pme(row.get('Last PME'), row.get('DOB'), row.get('Medical category'))
                 if nxt == "MISSING_DATE":
-                    alert_list.append({"Name": row['Employee Name'], "ID": row['HRMS ID'], "Due": "Update Last PME", "Status": "⚪ DATA MISSING"})
+                    alert_list.append({"Name": row.get('Employee Name'), "HRMS ID": row.get('HRMS ID'), "Next Due": "Last PME Missing", "Status": "⚪ UPDATE DATA"})
                 elif nxt and nxt <= window:
                     status = "🔴 OVERDUE" if nxt < today else "🟠 DUE SOON"
-                    alert_list.append({"Name": row['Employee Name'], "ID": row['HRMS ID'], "Due": nxt.strftime("%d/%m/%Y"), "Status": status})
+                    alert_list.append({"Name": row.get('Employee Name'), "HRMS ID": row.get('HRMS ID'), "Next Due": nxt.strftime("%d/%m/%Y"), "Status": status})
             
-            if alert_list: st.table(pd.DataFrame(alert_list))
-            else: st.success("✅ Sabhi PME up-to-date hain.")
+            if alert_list:
+                st.table(pd.DataFrame(alert_list))
+            else:
+                st.success("✅ Sabhi karmchariyon ki PME up-to-date hai.")
 
-        tab1, tab2, tab3 = st.tabs(["📝 Generate Memo", "📊 History", "🛠 Update Database"])
+        st.divider()
+
+        tab1, tab2, tab3 = st.tabs(["📝 Generate PME Memo", "📊 History", "🛠 Update Database"])
 
         with tab1:
             if not df_emp.empty:
@@ -169,23 +176,35 @@ if check_password():
                         else: st.error("❌ Template Not Found!")
                 
                 if st.session_state.get('memo_bytes'):
-                    st.download_button("📥 Download PME Memo", st.session_state.memo_bytes, f"PME_{h_id}.docx")
+                    st.download_button("📥 Download PME Memo", st.session_state.memo_bytes, f"PME_{emp_data.get('Employee Name', '')}.docx")
 
         with tab2:
-            st.header("Generation History")
-            h_docs = db.collection("pme_history").order_by("Timestamp", direction=firestore.Query.DESCENDING).limit(15).stream()
+            st.header("Recent PME Generations")
+            h_docs = db.collection("pme_history").order_by("Timestamp", direction=firestore.Query.DESCENDING).limit(10).stream()
             h_list = [d.to_dict() for d in h_docs]
-            if h_list: st.dataframe(pd.DataFrame(h_list)[['Timestamp', 'name', 'medical_category']], use_container_width=True)
+            if h_list:
+                st.dataframe(pd.DataFrame(h_list)[['Timestamp', 'name', 'age', 'medical_category']], use_container_width=True)
 
         with tab3:
-            st.header("🛠 Update Records")
-            u_sel = st.selectbox("Select to Update", emp_names, key="u_pme")
+            st.header("🛠 Update Employee Medical Data")
+            u_sel = st.selectbox("Select Employee to Update", emp_names, key="upd_pme_final")
             u_id = u_sel.split('(')[-1].strip(')')
             u_row = df_emp[df_emp['HRMS ID'] == u_id].iloc[0]
-            with st.form("upd_form"):
-                lp_date = st.text_input("Last PME (DD/MM/YYYY)", value=u_row.get('Last PME', ''))
-                lp_cat = st.text_input("Medical Category", value=u_row.get('Medical category', ''))
-                if st.form_submit_button("Save to Firebase"):
-                    db.collection("employees").document(u_row['id']).update({"Last PME": lp_date, "Medical category": lp_cat})
-                    st.success("✅ Database Updated!")
+            
+            with st.form("medical_update_form"):
+                col1, col2 = st.columns(2)
+                m1 = col1.text_input("Physical Mark 1", u_row.get('Physical Mark 1', ''))
+                m2 = col2.text_input("Physical Mark 2", u_row.get('Physical Mark 2', ''))
+                lp_date = col1.text_input("Last PME Date (DD/MM/YYYY)", u_row.get('Last PME', ''))
+                lp_cat = col2.text_input("Last Medical Category", u_row.get('Medical category', ''))
+                lp_place = col1.text_input("Last PME Place", u_row.get('Last PME Place', ''))
+                lp_exam = col2.text_input("Last Examiner", u_row.get('Last Examiner', 'ACMS/NKJ'))
+                
+                if st.form_submit_button("Save & Refresh Dashboard"):
+                    db.collection("employees").document(u_row['id']).update({
+                        "Physical Mark 1": m1, "Physical Mark 2": m2,
+                        "Last PME": lp_date, "Medical category": lp_cat,
+                        "Last PME Place": lp_place, "Last Examiner": lp_exam
+                    })
+                    st.success("✅ Records Updated Successfully!")
                     st.rerun()
