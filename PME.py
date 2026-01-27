@@ -30,36 +30,48 @@ def init_db():
 
 db = init_db()
 
-# --- 1. Robust Utilities ---
+# --- 1. Utilities ---
 def get_safe_date(date_val):
     if not date_val or str(date_val).lower() == 'nan' or date_val == "":
         return None
     try:
-        # Check if it's already a datetime object (from Firestore)
         if hasattr(date_val, 'to_datetime'):
             return date_val.to_datetime().replace(tzinfo=None)
-        # Parse string formats like DD/MM/YYYY
         return pd.to_datetime(date_val, dayfirst=True).to_pydatetime().replace(tzinfo=None)
     except: return None
 
-def calculate_next_pme(last_pme_raw, dob_raw):
+def calculate_next_pme(last_pme_raw, dob_raw, medical_cat):
     """
-    Railway Medical Manual (IRMM) logic:
-    Age < 45: Every 4 years
-    Age 45-55: Every 2 years
-    Age 55+: Every 1 year
+    Railway Medical Rules (IRMM):
+    A1, A2, A3: <45 (4yr), 45-55 (2yr), 55+ (1yr)
+    B1, B2: First at 45 years, then every 5 years.
     """
     last_pme = get_safe_date(last_pme_raw)
     dob = get_safe_date(dob_raw)
-    if not last_pme or not dob:
-        return None
+    if not dob: return None
     
-    age_at_pme = relativedelta(last_pme, dob).years
-    if age_at_pme < 45: interval = 4
-    elif 45 <= age_at_pme < 55: interval = 2
-    else: interval = 1
+    cat = str(medical_cat).upper().strip()
     
-    return last_pme + relativedelta(years=interval)
+    # Logic for A-Categories
+    if any(x in cat for x in ["A1", "A2", "A3"]):
+        if not last_pme: return None
+        age_at_pme = relativedelta(last_pme, dob).years
+        interval = 4 if age_at_pme < 45 else (2 if age_at_pme < 55 else 1)
+        return last_pme + relativedelta(years=interval)
+    
+    # Logic for B-Categories (B1/B2)
+    elif "B" in cat:
+        # If never examined, due on 45th birthday
+        due_45 = dob + relativedelta(years=45)
+        if not last_pme: return due_45
+        
+        age_at_pme = relativedelta(last_pme, dob).years
+        if age_at_pme < 45: 
+            return due_45
+        else: 
+            return last_pme + relativedelta(years=5)
+            
+    return None
 
 def calculate_pme_metrics(dob_raw, doa_raw):
     now = datetime.now()
@@ -86,11 +98,8 @@ def replace_placeholders(doc, mapping):
         for key, val in mapping.items():
             placeholder = "{{ " + str(key) + " }}"
             if placeholder in p.text:
-                full_text = "".join(run.text for run in p.runs)
-                if placeholder in full_text:
-                    new_text = full_text.replace(placeholder, str(val))
-                    for i, run in enumerate(p.runs):
-                        run.text = new_text if i == 0 else ""
+                new_text = p.text.replace(placeholder, str(val))
+                p.text = new_text
 
 # --- 2. Main Interface ---
 st.set_page_config(layout="wide", page_title="Railway PME System")
@@ -99,43 +108,31 @@ if db is not None:
     docs = db.collection("employees").stream()
     df_emp = pd.DataFrame([{**d.to_dict(), 'id': d.id} for d in docs])
 
-    if 'memo_bytes' not in st.session_state: st.session_state.memo_bytes = None
-
-    # --- 📢 PME DUE ALERT SECTION ---
+    # --- 📢 PME ALERT DASHBOARD ---
+    st.subheader("⚠️ PME Alerts (Next 15 Days)")
     if not df_emp.empty:
-        st.subheader("⚠️ PME Due Alerts (Next 15 Days)")
-        due_list = []
         today = datetime.now()
         alert_window = today + timedelta(days=15)
+        alerts = []
 
         for _, row in df_emp.iterrows():
-            next_pme = calculate_next_pme(row.get('Last PME'), row.get('DOB'))
-            if next_pme:
-                # Alert if PME is already overdue or due within 15 days
-                if next_pme <= alert_window:
-                    status = "OVERDUE" if next_pme < today else "DUE SOON"
-                    due_list.append({
-                        "Employee": row.get('Employee Name'),
-                        "HRMS ID": row.get('HRMS ID'),
-                        "Last PME": row.get('Last PME'),
-                        "Next PME Due": next_pme.strftime("%d/%m/%Y"),
-                        "Status": status
-                    })
+            next_pme = calculate_next_pme(row.get('Last PME'), row.get('DOB'), row.get('Medical category'))
+            if next_pme and next_pme <= alert_window:
+                alerts.append({
+                    "Name": row.get('Employee Name'),
+                    "Category": row.get('Medical category'),
+                    "Next PME Due": next_pme.strftime("%d/%m/%Y"),
+                    "Status": "OVERDUE" if next_pme < today else "DUE SOON"
+                })
         
-        if due_list:
-            due_df = pd.DataFrame(due_list)
-            # Styling for alerts
-            def color_status(val):
-                color = 'red' if val == "OVERDUE" else 'orange'
-                return f'background-color: {color}; color: white; font-weight: bold'
-            
-            st.table(due_df.style.applymap(color_status, subset=['Status']))
+        if alerts:
+            alert_df = pd.DataFrame(alerts)
+            st.warning(f"Total {len(alerts)} employees need medical attention.")
+            st.table(alert_df)
         else:
-            st.success("✅ Sabhi karmchariyon ki PME up-to-date hai.")
-    
-    st.divider()
+            st.success("✅ No PME due in the next 15 days.")
 
-    tab1, tab2, tab3 = st.tabs(["📝 Generate PME Memo", "📊 History", "🛠 Update Database"])
+    tab1, tab2, tab3 = st.tabs(["📝 Generate Memo", "📊 History", "🛠 Update Database"])
 
     with tab1:
         if not df_emp.empty:
@@ -150,8 +147,7 @@ if db is not None:
                 
                 final_mapping = {
                     "dob": m["dob_f"], "doa": m["doa_f"],
-                    "name": emp_data.get('Employee Name', ''),
-                    "age": m["age"],
+                    "name": emp_data.get('Employee Name', ''), "age": m["age"],
                     "father_name": emp_data.get("FATHER'S NAME", ''),
                     "designation": emp_data.get('Designation', ''),
                     "medical_category": emp_data.get('Medical category', ''),
@@ -164,7 +160,7 @@ if db is not None:
                     "service_year": m["s_yr"], "service_month": m["s_mn"]
                 }
 
-                if st.form_submit_button("Generate Memo"):
+                if st.form_submit_button("Generate & Log"):
                     if os.path.exists(TEMPLATE_PATH):
                         doc = Document(TEMPLATE_PATH)
                         replace_placeholders(doc, final_mapping)
@@ -172,45 +168,27 @@ if db is not None:
                         doc.save(buf)
                         st.session_state.memo_bytes = buf.getvalue()
                         db.collection("pme_history").add({**final_mapping, "Timestamp": datetime.now(), "HRMS_ID": h_id})
-                        st.success("✅ Document Generated!")
-                    else: st.error("Template Not Found!")
+                        st.success("✅ Memo Generated!")
+                        st.rerun()
+                    else: st.error("Template not found!")
 
-            if st.session_state.memo_bytes:
-                st.download_button("📥 Download PME Memo", st.session_state.memo_bytes, f"PME_{emp_data.get('Employee Name', '')}.docx")
-
-    with tab2:
-        st.header("Recent Generations")
-        h_docs = db.collection("pme_history").order_by("Timestamp", direction=firestore.Query.DESCENDING).limit(10).stream()
-        h_list = [{**d.to_dict()} for d in h_docs]
-        if h_list: st.dataframe(pd.DataFrame(h_list)[['Timestamp', 'name', 'age', 'service_year']], use_container_width=True)
+            if st.session_state.get('memo_bytes'):
+                st.download_button("📥 Download", st.session_state.memo_bytes, f"PME_{h_id}.docx")
 
     with tab3:
-        st.header("🛠 Update Employee Medical Data")
-        if not df_emp.empty:
-            t_sel = st.selectbox("Select Employee to Update", emp_names, key="upd_pme_final")
-            t_id = t_sel.split('(')[-1].strip(')')
-            t_row = df_emp[df_emp['HRMS ID'] == t_id].iloc[0]
+        st.header("🛠 Medical Data Update")
+        t_sel = st.selectbox("Select Employee", emp_names, key="upd_pme")
+        t_id = t_sel.split('(')[-1].strip(')')
+        t_row = df_emp[df_emp['HRMS ID'] == t_id].iloc[0]
+        
+        with st.form("update_medical"):
+            lp_date = st.text_input("New PME Date (DD/MM/YYYY)", value=t_row.get('Last PME', ''))
+            lp_cat = st.text_input("Medical Category", value=t_row.get('Medical category', ''))
+            lp_place = st.text_input("Place", value=t_row.get('Last PME Place', ''))
             
-            with st.form("medical_update_form"):
-                col1, col2 = st.columns(2)
-                m1 = col1.text_input("Physical Mark 1", t_row.get('Physical Mark 1', ''))
-                m2 = col2.text_input("Physical Mark 2", t_row.get('Physical Mark 2', ''))
-                lp_date = col1.text_input("Last PME Date (DD/MM/YYYY)", t_row.get('Last PME', ''))
-                lp_cat = col2.text_input("Last Medical Category", t_row.get('Medical category', ''))
-                lp_place = col1.text_input("Last PME Place", t_row.get('Last PME Place', ''))
-                lp_exam = col2.text_input("Last Examiner", t_row.get('Last Examiner', 'ACMS/NKJ'))
-                
-                if st.form_submit_button("Save & Update Records"):
-                    # Validate date before saving
-                    try:
-                        valid_date = pd.to_datetime(lp_date, dayfirst=True)
-                        db.collection("employees").document(t_row['id']).update({
-                            "Physical Mark 1": m1, "Physical Mark 2": m2,
-                            "Last PME": lp_date, "Medical category": lp_cat,
-                            "Last PME Place": lp_place, "Last Examiner": lp_exam
-                        })
-                        st.success("✅ Employee Data Updated! Alert will disappear if next PME is > 15 days from today.")
-                        st.rerun()
-                    except:
-                        st.error("Invalid Date Format! Use DD/MM/YYYY")
-else: st.error("Database Connection Failed.")
+            if st.form_submit_button("Update Firebase"):
+                db.collection("employees").document(t_row['id']).update({
+                    "Last PME": lp_date, "Medical category": lp_cat, "Last PME Place": lp_place
+                })
+                st.success("Database Updated! Dashboard refreshing...")
+                st.rerun()
